@@ -13,9 +13,10 @@
 3. [Goals & Objectives](#goals--objectives)
 4. [Requirements](#requirements)
 5. [Technical Architecture](#technical-architecture)
-6. [Implementation Plan](#implementation-plan)
-7. [Success Metrics](#success-metrics)
-8. [Appendices](#appendices)
+6. [MCP Tool Definition Examples](#mcp-tool-definition-examples)
+7. [Implementation Plan](#implementation-plan)
+8. [Success Metrics](#success-metrics)
+9. [Appendices](#appendices)
 
 ---
 
@@ -594,6 +595,168 @@ await sandbox.destroy();
 
 ---
 
+## MCP Tool Definition Examples
+
+Based on the txt2mcp repository patterns, here are examples of how the sandbox MCP tools should be defined:
+
+```typescript
+onStart() {
+  // Create or get a sandbox instance
+  this.server.tool({
+    name: "getSandbox",
+    description: "Creates or gets a sandbox instance for secure code execution",
+    parameters: z.object({
+      keepAlive: z.boolean().optional().describe("Whether to keep sandbox alive after execution (requires explicit destroy call)"),
+      timeout: z.number().optional().describe("Maximum time in seconds to keep the sandbox alive when idle"),
+      preinstall: z.array(z.string()).optional().describe("Packages to pre-install in the sandbox"),
+      env: z.record(z.string()).optional().describe("Environment variables to set in the sandbox")
+    }),
+    handler: async (params, ctx) => {
+      // Implementation using Cloudflare Sandbox SDK
+      try {
+        const sandbox = await this.sandboxManager.getSandbox({
+          keepAlive: params.keepAlive || false,
+          timeout: params.timeout,
+          env: {
+            ...params.env,
+            ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY
+          }
+        });
+        
+        // Pre-install requested packages if specified
+        if (params.preinstall && params.preinstall.length > 0) {
+          // Installation logic here
+        }
+        
+        return { 
+          sandboxId: sandbox.id,
+          status: "ready"
+        };
+      } catch (error) {
+        return { 
+          error: "Failed to create sandbox", 
+          details: error.message 
+        };
+      }
+    }
+  });
+  
+  // Execute code in a sandbox
+  this.server.tool({
+    name: "exec",
+    description: "Executes code within a sandbox environment",
+    parameters: z.object({
+      sandboxId: z.string().describe("ID of the sandbox to execute code in"),
+      code: z.string().describe("Code to execute in the sandbox"),
+      language: z.enum(["javascript", "typescript", "python"]).default("javascript").describe("Programming language of the code"),
+      timeout: z.number().optional().describe("Maximum execution time in seconds")
+    }),
+    handler: async (params, ctx) => {
+      try {
+        const sandbox = this.sandboxManager.getSandboxById(params.sandboxId);
+        if (!sandbox) {
+          return { error: "Sandbox not found" };
+        }
+        
+        const result = await sandbox.execute({
+          code: params.code,
+          language: params.language,
+          timeout: params.timeout
+        });
+        
+        return {
+          output: result.output,
+          error: result.error,
+          executionTime: result.executionTime
+        };
+      } catch (error) {
+        return { 
+          error: "Execution failed", 
+          details: error.message 
+        };
+      }
+    }
+  });
+  
+  // Start a background process
+  this.server.tool({
+    name: "startBackgroundProcess",
+    description: "Starts a long-running background process in the sandbox",
+    parameters: z.object({
+      sandboxId: z.string().describe("ID of the sandbox to start the process in"),
+      command: z.string().describe("Command to execute as a background process"),
+      args: z.array(z.string()).optional().describe("Arguments to pass to the command"),
+      env: z.record(z.string()).optional().describe("Additional environment variables for the process")
+    }),
+    handler: async (params, ctx) => {
+      try {
+        const sandbox = this.sandboxManager.getSandboxById(params.sandboxId);
+        if (!sandbox) {
+          return { error: "Sandbox not found" };
+        }
+        
+        const process = await sandbox.startBackgroundProcess({
+          command: params.command,
+          args: params.args || [],
+          env: params.env || {}
+        });
+        
+        return {
+          processId: process.id,
+          status: "running"
+        };
+      } catch (error) {
+        return { 
+          error: "Failed to start background process", 
+          details: error.message 
+        };
+      }
+    }
+  });
+  
+  // Destroy a sandbox
+  this.server.tool({
+    name: "destroy",
+    description: "Terminates and destroys a sandbox instance",
+    parameters: z.object({
+      sandboxId: z.string().describe("ID of the sandbox to destroy")
+    }),
+    handler: async (params, ctx) => {
+      try {
+        const sandbox = this.sandboxManager.getSandboxById(params.sandboxId);
+        if (!sandbox) {
+          return { error: "Sandbox not found" };
+        }
+        
+        await sandbox.destroy();
+        
+        return {
+          status: "destroyed",
+          sandboxId: params.sandboxId
+        };
+      } catch (error) {
+        return { 
+          error: "Failed to destroy sandbox", 
+          details: error.message 
+        };
+      }
+    }
+  });
+}
+```
+
+These examples demonstrate:
+- Standard MCP tool structure following the txt2mcp patterns
+- Proper parameter validation with Zod schemas
+- Consistent error handling
+- Integration with Cloudflare Sandbox SDK
+- ANTHROPIC API key injection for AI capabilities
+- Proper state management via the Durable Object
+
+The implementation follows best practices for MCP tool definitions, ensuring clear descriptions for AI agents to understand tool capabilities and requirements.
+
+---
+
 ## Implementation Plan
 
 ### Phase 1: Foundation (Weeks 1-2)
@@ -1091,6 +1254,7 @@ try {
 |---------|------|--------|---------|
 | 1.0 | Nov 25, 2025 | Matthew Carey | Initial draft |
 | 2.0 | Nov 25, 2025 | Matthew Carey | Updated with corrected tool specs, V8 isolate details, keepAlive features, preview URLs, enhanced technical architecture |
+| 2.1 | Nov 25, 2025 | Matthew Carey | Added MCP Tool Definition Examples section |
 
 **Review & Approval:**
 - [ ] Technical Review - Pending
