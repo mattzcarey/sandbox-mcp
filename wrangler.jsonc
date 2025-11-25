@@ -12,11 +12,11 @@
 	},
 	"routes": [
 		{
-			"pattern": "*.sandbox.mcp.mattzcarey.com",
+			"pattern": "*.sandbox.mcp.mattzcarey.com/*",
 			"zone_name": "mattzcarey.com"
 		},
 		{
-			"pattern": "sandbox.mcp.mattzcarey.com",
+			"pattern": "sandbox.mcp.mattzcarey.com/*",
 			"zone_name": "mattzcarey.com"
 		}
 	],

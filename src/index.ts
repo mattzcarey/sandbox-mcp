@@ -10,7 +10,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { nanoid } from "nanoid";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 export { Sandbox } from "@cloudflare/sandbox";
 
@@ -19,17 +18,6 @@ const STATE_KEY = "mcp_transport_state";
 interface State {
   sandboxId: string | null;
 }
-
-const createSandboxMessage = (): CallToolResult => {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: "No sandbox found, call createSandbox first",
-      },
-    ],
-  };
-};
 
 export class SandboxMcpServer extends Agent<Env, State> {
   server = new McpServer({
@@ -59,12 +47,15 @@ export class SandboxMcpServer extends Agent<Env, State> {
       "createSandbox",
       {
         description:
-          "Creates a new sandbox instance. This sandbox will be used for the lifetime of this session. Returns status.",
-        inputSchema: {},
+          "Creates a new sandbox instance. Returns sandbox ID and status. We have a maximum we can use so if you already have a sandbox, you should use it. If you pass a sandboxId we will validate it and return it if it exists.",
+        inputSchema: {
+          sandboxId: z.string().optional(),
+        },
       },
-      async () => {
+      async ({ sandboxId }) => {
         try {
-          const id = nanoid(16).toLowerCase();
+          const id = sandboxId || nanoid(16).toLowerCase();
+
           console.log(`Creating sandbox with id: ${id}`);
           const sandbox = getSandbox(this.env.SANDBOX, id);
           this.setState({ sandboxId: id });
@@ -115,6 +106,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
         description:
           "Run any bash command in the sandbox. Returns stdout, stderr, and exit code.",
         inputSchema: z.object({
+          sandboxId: z.string().describe("ID of the sandbox to execute in"),
           command: z.string().describe("Bash command to execute"),
           timeout: z
             .number()
@@ -127,12 +119,8 @@ export class SandboxMcpServer extends Agent<Env, State> {
             .describe("Additional environment variables for execution"),
         }),
       },
-      async ({ command, timeout, envVars }) => {
+      async ({ sandboxId, command, timeout, envVars }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
 
           // sandbox.exec is the Cloudflare Sandbox SDK method for isolated execution
@@ -182,8 +170,11 @@ export class SandboxMcpServer extends Agent<Env, State> {
       "startProcess",
       {
         description:
-          "Starts a long-running background process in the sandbox. The process continues running independently of this connection.",
+          "Starts a long-running background process in the sandbox. The process continues running independently of the MCP connection.",
         inputSchema: z.object({
+          sandboxId: z
+            .string()
+            .describe("ID of the sandbox to start the process in"),
           command: z
             .string()
             .describe("Command to run as a background process"),
@@ -193,12 +184,8 @@ export class SandboxMcpServer extends Agent<Env, State> {
             .describe("Environment variables for the process"),
         }),
       },
-      async ({ command, envVars }) => {
+      async ({ sandboxId, command, envVars }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
 
           const proc = await sandbox.startProcess(command, {
@@ -245,14 +232,14 @@ export class SandboxMcpServer extends Agent<Env, State> {
       {
         description:
           "Lists all running background processes in a sandbox. Returns process IDs, commands, and status.",
-        inputSchema: {},
+        inputSchema: z.object({
+          sandboxId: z
+            .string()
+            .describe("ID of the sandbox to list processes from"),
+        }),
       },
-      async () => {
+      async ({ sandboxId }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
           const processes = await sandbox.listProcesses();
 
@@ -299,15 +286,12 @@ export class SandboxMcpServer extends Agent<Env, State> {
         description:
           "Gets accumulated log output from a running or completed background process.",
         inputSchema: z.object({
+          sandboxId: z.string().describe("ID of the sandbox"),
           processId: z.string().describe("ID of the process to get logs from"),
         }),
       },
-      async ({ processId }) => {
+      async ({ sandboxId, processId }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
           const logs = await sandbox.getProcessLogs(processId);
 
@@ -348,6 +332,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
       {
         description: "Terminates a specific background process in the sandbox.",
         inputSchema: z.object({
+          sandboxId: z.string().describe("ID of the sandbox"),
           processId: z.string().describe("ID of the process to kill"),
           signal: z
             .string()
@@ -357,12 +342,8 @@ export class SandboxMcpServer extends Agent<Env, State> {
             ),
         }),
       },
-      async ({ processId, signal }) => {
+      async ({ sandboxId, processId, signal }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
           await sandbox.killProcess(processId, signal);
 
@@ -405,14 +386,12 @@ export class SandboxMcpServer extends Agent<Env, State> {
       {
         description:
           "Terminates a sandbox and deletes all associated state, files, and processes. This action cannot be undone.",
-        inputSchema: {},
+        inputSchema: z.object({
+          sandboxId: z.string().describe("ID of the sandbox to destroy"),
+        }),
       },
-      async () => {
+      async ({ sandboxId }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
 
           await sandbox.destroy();
@@ -455,6 +434,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
         description:
           "Clones a git repository into the sandbox. Supports public repos and private repos with token auth. Use this instead of manually running git clone.",
         inputSchema: z.object({
+          sandboxId: z.string().describe("ID of the sandbox to clone into"),
           repositoryUrl: z
             .string()
             .describe(
@@ -474,12 +454,8 @@ export class SandboxMcpServer extends Agent<Env, State> {
             ),
         }),
       },
-      async ({ repositoryUrl, branch, targetDir }) => {
+      async ({ sandboxId, repositoryUrl, branch, targetDir }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
 
           // Use the Cloudflare Sandbox gitCheckout API
@@ -542,6 +518,9 @@ export class SandboxMcpServer extends Agent<Env, State> {
         description:
           "Runs Claude Code (AI coding assistant) in headless mode to complete a coding task. Starts as a background process that can be monitored with listProcesses and getProcessLogs. Claude Code is pre-installed in the sandbox container.",
         inputSchema: z.object({
+          sandboxId: z
+            .string()
+            .describe("ID of the sandbox to run Claude Code in"),
           prompt: z
             .string()
             .describe("The task/prompt for Claude Code to complete"),
@@ -577,6 +556,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
         }),
       },
       async ({
+        sandboxId,
         prompt,
         workingDirectory,
         allowedTools,
@@ -584,10 +564,6 @@ export class SandboxMcpServer extends Agent<Env, State> {
         maxTurns,
       }) => {
         try {
-          const sandboxId = this.state.sandboxId;
-          if (!sandboxId) {
-            return createSandboxMessage();
-          }
           const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
 
           // Build the Claude Code command with proper flags
@@ -668,6 +644,67 @@ export class SandboxMcpServer extends Agent<Env, State> {
         }
       }
     );
+
+    // Tool 10: exposePort - Expose a port from the sandbox as a public URL
+    this.server.registerTool(
+      "exposePort",
+      {
+        description:
+          "Exposes a port from the sandbox container as a publicly accessible preview URL. Use this when you need to access a web server, API, or other service running in the sandbox from outside. The URL format is {port}-{sandboxId}.{domain}.",
+        inputSchema: z.object({
+          sandboxId: z.string().describe("ID of the sandbox"),
+          port: z
+            .number()
+            .describe(
+              "Port number to expose (e.g., 3000, 8080). Must be a port that a service is listening on inside the sandbox."
+            ),
+        }),
+      },
+      async ({ sandboxId, port }) => {
+        try {
+          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
+
+          // exposePort returns a URL that can be used to access the port
+          const previewUrl = await sandbox.exposePort(port, {
+            hostname: "sandbox.mcp.mattzcarey.com",
+          });
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    sandboxId,
+                    port,
+                    previewUrl,
+                    message: `Port ${port} is now accessible at the preview URL`,
+                    tips: [
+                      "Make sure a service is actually running on this port inside the sandbox",
+                      "Use startProcess to start a web server before exposing the port",
+                      "The preview URL will remain active as long as the sandbox is running",
+                    ],
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Failed to expose port: ${
+                  error instanceof Error ? error.message : "Unknown error"
+                }`,
+              },
+            ],
+          };
+        }
+      }
+    );
   }
 
   async ensureDestroy() {
@@ -680,8 +717,8 @@ export class SandboxMcpServer extends Agent<Env, State> {
         await this.cancelSchedule(s.id);
       }
     }
-    // Destroy after 15 minutes of inactivity
-    await this.schedule(60 * 15, "destroySandbox");
+    // Destroy after 1 hour of inactivity
+    await this.schedule(60 * 60, "destroySandbox");
   }
 
   async destroySandbox() {
@@ -690,6 +727,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
       const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
       await sandbox.destroy();
     }
+
     this.destroy();
   }
 
@@ -741,6 +779,7 @@ app.get("/", (c) => {
       "destroySandbox",
       "gitCheckout",
       "runClaudeCode",
+      "exposePort",
     ],
   });
 });
