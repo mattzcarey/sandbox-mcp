@@ -602,7 +602,7 @@ Based on the txt2mcp repository patterns, here are examples of how the sandbox M
 ```typescript
 onStart() {
   // Create or get a sandbox instance
-  this.server.tool({
+  this.server.registerTool({
     name: "getSandbox",
     description: "Creates or gets a sandbox instance for secure code execution",
     parameters: z.object({
@@ -642,7 +642,7 @@ onStart() {
   });
   
   // Execute code in a sandbox
-  this.server.tool({
+  this.server.registerTool({
     name: "exec",
     description: "Executes code within a sandbox environment",
     parameters: z.object({
@@ -679,7 +679,7 @@ onStart() {
   });
   
   // Start a background process
-  this.server.tool({
+  this.server.registerTool({
     name: "startBackgroundProcess",
     description: "Starts a long-running background process in the sandbox",
     parameters: z.object({
@@ -715,7 +715,7 @@ onStart() {
   });
   
   // Destroy a sandbox
-  this.server.tool({
+  this.server.registerTool({
     name: "destroy",
     description: "Terminates and destroys a sandbox instance",
     parameters: z.object({
