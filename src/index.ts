@@ -47,7 +47,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
       "createSandbox",
       {
         description:
-          "Creates a new sandbox instance. Returns sandbox ID and status. We have a maximum we can use so if you already have a sandbox, you should use it. If you pass a sandboxId we will validate it and return it if it exists.",
+          "Creates a new sandbox instance. Returns sandbox ID and status. We can only use a limited number of sandboxes, so if you already have a sandbox, you should use it. If you pass a sandboxId we will validate it and return it if it exists.",
         inputSchema: {
           sandboxId: z.string().optional(),
         },
@@ -709,7 +709,7 @@ export class SandboxMcpServer extends Agent<Env, State> {
 
   async ensureDestroy() {
     const schedules = this.getSchedules().filter(
-      (s) => s.callback === "destroy"
+      (s) => s.callback === "destroySandbox"
     );
     if (schedules.length > 0) {
       // Cancel previously set destroy schedules
@@ -795,8 +795,33 @@ export default {
 
     // Route /mcp to the MCP handler
     if (url.pathname.startsWith("/mcp")) {
-      const sessionId =
-        request.headers.get("mcp-session-id") ?? crypto.randomUUID();
+      const sessionIdHeader = request.headers.get("mcp-session-id");
+      const sessionId = sessionIdHeader ?? crypto.randomUUID();
+
+      // Clone request to read body for logging without consuming it
+      const clonedRequest = request.clone();
+      let bodyForLog: unknown = null;
+      try {
+        const contentType = request.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          bodyForLog = await clonedRequest.json();
+        } else {
+          bodyForLog = await clonedRequest.text();
+        }
+      } catch {
+        bodyForLog = "[failed to parse body]";
+      }
+
+      // Log session ID and request details
+      console.log("=== MCP Request Debug ===");
+      console.log("Method:", request.method);
+      console.log("Path:", url.pathname);
+      console.log("mcp-session-id header:", sessionIdHeader ?? "(not set)");
+      console.log("Using session ID:", sessionId);
+      console.log("Request body:", JSON.stringify(bodyForLog, null, 2));
+      console.log("All headers:", JSON.stringify(Object.fromEntries(request.headers.entries()), null, 2));
+      console.log("=========================");
+
       const agent = await getAgentByName(env.MCP_SERVER, sessionId);
       return await agent.onMcpRequest(request);
     }
