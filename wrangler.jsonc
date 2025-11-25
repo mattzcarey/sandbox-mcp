@@ -1,0 +1,52 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "sandbox-mcp",
+	"account_id": "543fbdef1eeaed8a02c251c8c4d9510b",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-01-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	},
+	"routes": [
+		{
+			"pattern": "*.sandbox.mcp.mattzcarey.com",
+			"zone_name": "mattzcarey.com"
+		},
+		{
+			"pattern": "sandbox.mcp.mattzcarey.com",
+			"zone_name": "mattzcarey.com"
+		}
+	],
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile",
+			"instance_type": "lite",
+			"max_instances": 10
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "SANDBOX",
+				"class_name": "Sandbox"
+			},
+			{
+				"name": "MCP_SERVER",
+				"class_name": "SandboxMcpServer"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Sandbox", "SandboxMcpServer"]
+		}
+	]
+	// Secrets (set via wrangler secret put):
+	// - AUTH_TOKEN: Bearer token for MCP authentication
+	// - ANTHROPIC_API_KEY: Anthropic API key to inject into sandboxes
+}

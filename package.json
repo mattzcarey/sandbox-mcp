@@ -1,0 +1,29 @@
+{
+	"name": "sandbox-mcp",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"typecheck": "tsc --noEmit",
+		"types": "wrangler types",
+		"format": "biome format --write .",
+		"lint": "biome lint .",
+		"check": "biome check --write ."
+	},
+	"dependencies": {
+		"@cloudflare/sandbox": "^0.5.3",
+		"@modelcontextprotocol/sdk": "^1.22.0",
+		"agents": "^0.2.23",
+		"hono": "^4.7.0",
+		"nanoid": "^5.1.6",
+		"zod": "^3.24.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.4",
+		"@types/node": "^22.10.0",
+		"typescript": "^5.7.0",
+		"wrangler": "^4.46.0"
+	}
+}
