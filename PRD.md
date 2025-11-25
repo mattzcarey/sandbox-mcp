@@ -1,9 +1,9 @@
 # Product Requirements Document: Cloudflare Sandbox MCP Integration
 
-**Document Version:** 1.0  
+**Document Version:** 2.0  
 **Last Updated:** November 25, 2025  
 **Author:** Matthew Carey  
-**Status:** Draft
+**Status:** Active Development
 
 ---
 
@@ -11,929 +11,729 @@
 1. [Executive Summary](#executive-summary)
 2. [Overview](#overview)
 3. [Goals & Objectives](#goals--objectives)
-4. [Core Functionality](#core-functionality)
-5. [Architecture](#architecture)
-6. [Technical Implementation](#technical-implementation)
-7. [API Design](#api-design)
-8. [Security & Authentication](#security--authentication)
-9. [Deployment Instructions](#deployment-instructions)
-10. [Implementation Timeline](#implementation-timeline)
-11. [Success Metrics](#success-metrics)
-12. [Risk Assessment](#risk-assessment)
-13. [Future Considerations](#future-considerations)
+4. [Requirements](#requirements)
+5. [Technical Architecture](#technical-architecture)
+6. [Implementation Plan](#implementation-plan)
+7. [Success Metrics](#success-metrics)
+8. [Appendices](#appendices)
 
 ---
 
 ## Executive Summary
 
-This document outlines the requirements for developing a Model Context Protocol (MCP) server that integrates with Cloudflare's sandbox environments. The solution will enable AI agents to programmatically create, manage, and execute code within isolated sandbox instances running on Cloudflare Workers runtime.
+This document outlines the requirements for developing a Model Context Protocol (MCP) server that integrates with Cloudflare's Sandbox API. The solution enables AI agents to programmatically create, manage, and execute code within isolated sandbox instances powered by V8 isolates with ~1ms cold start times.
 
-The primary use case is to provide AI agents with secure, ephemeral compute environments for code execution, testing, and development tasks. This implementation follows patterns established in the txt2mcp project while adapting them specifically for sandbox operations.
+The implementation follows patterns established in the txt2mcp project, adapted specifically for sandbox functionality. Key features include persistent sandbox management via keepAlive, background process support, preview URLs for service exposure, and secure authentication using Wrangler secrets as bindings.
+
+**Key Value Propositions:**
+- Ultra-fast V8 isolate-based execution (~1ms cold starts)
+- Persistent sandboxes with configurable keepAlive
+- Secure AI-generated code execution environments
+- Bearer token authentication with ANTHROPIC credentials
+- Simplified MCP server implementation with single /mcp endpoint
 
 ---
 
 ## Overview
 
 ### Product Description
-An MCP server that provides a standardized interface for managing Cloudflare sandbox environments. The server acts as a bridge between AI agents and Cloudflare's sandbox infrastructure, enabling:
 
-- Dynamic creation and management of sandbox instances
-- Secure code execution within isolated environments
-- Long-running background process management
-- Automatic cleanup and resource management
+An MCP server that provides a standardized interface for managing Cloudflare sandbox environments via the Cloudflare Sandbox SDK. The server acts as a bridge between AI agents and Cloudflare's sandbox infrastructure, enabling:
 
-### Key Characteristics
-- **Runtime:** Cloudflare Workers
-- **Deployment Tool:** Wrangler CLI
-- **Architecture Pattern:** Based on txt2mcp implementation
-- **Authentication:** Bearer token with Wrangler secrets
-- **Protocol:** Model Context Protocol (MCP)
+- **Dynamic Sandbox Management**: Get or create sandbox instances on-demand
+- **Secure Code Execution**: Execute arbitrary code within V8 isolates
+- **Background Process Management**: Start and monitor long-running processes
+- **Complete Lifecycle Control**: Terminate containers and delete all state
+
+### Technical Foundation
+
+**Built on Cloudflare Sandbox Technology:**
+- V8 isolates for secure, fast execution
+- ~1ms cold start times for instant responsiveness
+- Global edge deployment via Cloudflare Workers
+- Preview URLs for exposing sandbox services
+
+**Key Architectural Decisions:**
+- Single `/mcp` endpoint (no additional routes needed)
+- `createMcpHandler` for agent state management
+- Bearer token auth using Wrangler secrets as bindings
+- ANTHROPIC credentials running in sandbox context
+- Pattern consistency with txt2mcp implementation
+
+### Documentation References
+
+- **Main Documentation**: https://developers.cloudflare.com/sandbox/
+- **API Reference**: https://developers.cloudflare.com/sandbox/api/
+- **Lifecycle Management**: https://developers.cloudflare.com/sandbox/api/lifecycle/
+- **Configuration Options**: https://developers.cloudflare.com/sandbox/configuration/sandbox-options/
+- **GitHub Repository**: https://github.com/cloudflare/sandbox-sdk
 
 ### Target Users
-- AI agents requiring code execution capabilities
-- Developers building agent-based applications
+
+- AI agents requiring safe code execution capabilities
+- Developers building autonomous agent systems
 - Teams needing isolated compute environments for testing
-- Applications requiring secure, ephemeral execution contexts
+- Applications requiring ephemeral execution contexts with fast initialization
 
 ---
 
 ## Goals & Objectives
 
 ### Primary Goals
-1. **Provide Secure Sandbox Management**: Enable creation and management of isolated execution environments
+
+1. **Provide Secure Sandbox Management**: Enable creation and management of V8 isolate-based execution environments
 2. **Standardize MCP Interface**: Implement consistent MCP patterns for sandbox operations
-3. **Ensure Scalability**: Leverage Cloudflare Workers for global distribution and scale
-4. **Maintain Security**: Implement robust authentication and isolation mechanisms
+3. **Ensure Ultra-Low Latency**: Leverage V8 isolates for <1ms cold starts and rapid execution
+4. **Maintain Security**: Implement robust authentication and isolation mechanisms via Cloudflare's platform
 
 ### Success Criteria
-- All four core tools (getSandbox, exec, startBackgroundProcess, destroySandbox) functional
-- < 100ms latency for sandbox operations (excluding cold starts)
+
+- All four core tools (getSandbox, exec, startBackgroundProcess, destroy) functional
+- Cold start latency ~1ms (V8 isolate performance)
+- < 50ms latency for sandbox operations
 - 99.9% uptime leveraging Cloudflare's infrastructure
 - Zero cross-sandbox data leakage
+- Seamless ANTHROPIC credential integration
 - Comprehensive documentation and examples
 
 ### Non-Goals
-- General-purpose compute platform (not a replacement for full VMs)
-- Persistent storage beyond session lifetime
+
+- General-purpose compute platform (not a replacement for traditional VMs)
+- Persistent storage beyond session lifetime (unless explicitly configured)
 - Multi-tenancy within single sandbox instances
-- Complex orchestration or workflow management
+- Complex orchestration beyond background processes
+- Custom runtime environments outside V8
 
 ---
 
-## Core Functionality
+## Requirements
 
-### 1. getSandbox Tool
+### Core Functionality
 
-**Purpose:** Retrieve information about existing sandbox instances and their current states.
+#### 1. getSandbox() - Get or Create Sandbox Instance
+
+**Purpose:** Retrieve an existing sandbox or create a new one with specified configuration.
+
+**Method Signature:**
+```typescript
+async function getSandbox(options?: {
+  sandboxId?: string;
+  keepAlive?: boolean;
+  timeoutMs?: number;
+}): Promise<Sandbox>
+```
 
 **Inputs:**
-- `sandboxId` (optional): Specific sandbox identifier
-- `filters` (optional): Status, creation time, owner
+- `sandboxId` (optional): Specific sandbox identifier to retrieve
+- `keepAlive` (optional): Enable persistent sandbox mode
+- `timeoutMs` (optional): Timeout duration for keepAlive sessions
 
 **Outputs:**
 ```json
 {
   "sandboxId": "string",
-  "status": "running|stopped|error",
+  "status": "running|stopped|initializing",
   "createdAt": "ISO8601 timestamp",
-  "uptime": "duration in seconds",
-  "resources": {
-    "cpu": "usage percentage",
-    "memory": "usage in MB"
-  },
+  "keepAlive": "boolean",
+  "expiresAt": "ISO8601 timestamp (if keepAlive enabled)",
   "environment": {
-    "hasAnthropicCredentials": "boolean"
-  }
+    "hasAnthropicCredentials": true,
+    "v8Version": "string",
+    "previewUrl": "string (if applicable)"
+  },
+  "coldStartTime": "duration in ms"
 }
 ```
 
 **Behavior:**
-- If no sandboxId provided, returns list of all active sandboxes
-- Includes health status and resource utilization
-- Shows whether keep-alive is enabled
-- Returns error if sandbox not found
+- If `sandboxId` provided, attempts to retrieve existing sandbox
+- If sandbox doesn't exist or no ID provided, creates new V8 isolate
+- Supports keepAlive configuration for persistent sandboxes
+- Returns sandbox metadata including preview URLs
+- Injects ANTHROPIC credentials into sandbox environment
+- ~1ms cold start time for new sandboxes
 
 ---
 
-### 2. exec Tool
+#### 2. exec - Execute Code in Sandbox
 
-**Purpose:** Execute commands or code snippets within sandbox environments.
+**Purpose:** Execute code snippets or commands synchronously within a sandbox environment.
+
+**Method Signature:**
+```typescript
+async function exec(params: {
+  sandboxId?: string;
+  code: string;
+  language?: 'javascript' | 'typescript';
+  timeout?: number;
+  env?: Record<string, string>;
+}): Promise<ExecResult>
+```
 
 **Inputs:**
-- `sandboxId`: Target sandbox identifier
-- `command`: Command or code to execute
-- `language` (optional): Runtime language (js, python, etc.)
-- `timeout` (optional): Maximum execution time (default: 30s)
+- `sandboxId` (optional): Target sandbox (creates new if not provided)
+- `code`: Code to execute (required)
+- `language` (optional): Runtime language (default: 'javascript')
+- `timeout` (optional): Maximum execution time in seconds (default: 30)
 - `env` (optional): Additional environment variables
 
 **Outputs:**
 ```json
 {
-  "exitCode": "number",
+  "exitCode": 0,
   "stdout": "string",
   "stderr": "string",
   "executionTime": "duration in ms",
-  "sandboxId": "string"
+  "sandboxId": "string",
+  "success": true
 }
 ```
 
 **Behavior:**
 - Creates sandbox if sandboxId not provided
-- Streams output for long-running commands
-- Enforces timeout limits
+- Executes code within V8 isolate
 - Captures both stdout and stderr
+- Enforces timeout limits
 - Returns execution metrics
+- Maintains sandbox state for subsequent calls
+- ANTHROPIC credentials available via environment
+
+**Example:**
+```javascript
+// Execute AI-generated code
+const result = await exec({
+  code: `
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY
+    });
+    const response = await client.messages.create({
+      model: 'claude-3-opus-20240229',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: 'Hello!' }]
+    });
+    console.log(response.content[0].text);
+  `,
+  timeout: 60
+});
+```
 
 ---
 
-### 3. startBackgroundProcess Tool
+#### 3. startBackgroundProcess - Start Background Processes
 
-**Purpose:** Launch long-running processes that persist beyond single command execution.
+**Purpose:** Launch long-running processes that persist independently of the MCP connection.
+
+**Method Signature:**
+```typescript
+async function startBackgroundProcess(params: {
+  sandboxId: string;
+  command: string;
+  name: string;
+  env?: Record<string, string>;
+  restartPolicy?: 'always' | 'on-failure' | 'never';
+}): Promise<ProcessInfo>
+```
 
 **Inputs:**
-- `sandboxId`: Target sandbox identifier
-- `command`: Process command to start
-- `name`: Process identifier/name
-- `restartPolicy` (optional): "always"|"on-failure"|"never"
-- `env` (optional): Environment variables
+- `sandboxId`: Target sandbox identifier (required)
+- `command`: Command to execute as background process (required)
+- `name`: Process identifier/name (required)
+- `env` (optional): Environment variables for the process
+- `restartPolicy` (optional): Restart behavior (default: 'never')
 
 **Outputs:**
 ```json
 {
   "processId": "string",
   "sandboxId": "string",
+  "name": "string",
   "status": "starting|running|failed",
-  "pid": "number",
-  "startTime": "ISO8601 timestamp"
+  "pid": 12345,
+  "startTime": "ISO8601 timestamp",
+  "restartPolicy": "never",
+  "previewUrl": "https://preview-xyz.workers.dev (if exposes port)"
 }
 ```
 
 **Behavior:**
-- Processes run independently of MCP connection
-- Can be monitored via getSandbox
+- Starts process within existing sandbox
+- Process runs independently of MCP connection lifecycle
+- Can expose services via preview URLs
+- Supports automatic restart policies
+- Monitored via getSandbox() status
 - Automatically cleaned up on sandbox destruction
-- Supports restart policies for resilience
-- Logs accessible through separate endpoint
+- Logs accessible through sandbox API
+
+**Use Cases:**
+- Running web servers for testing
+- Starting database instances
+- Background data processing
+- Long-running AI workflows
 
 ---
 
-### 4. destroySandbox Tool
+#### 4. destroy() - Terminate Container and Delete All State
 
-**Purpose:** Clean up and terminate sandbox instances, releasing all resources.
+**Purpose:** Clean up and terminate sandbox instances, releasing all resources and deleting state.
+
+**Method Signature:**
+```typescript
+async function destroy(params: {
+  sandboxId: string;
+  force?: boolean;
+}): Promise<DestroyResult>
+```
 
 **Inputs:**
-- `sandboxId`: Sandbox to destroy
-- `force` (optional): Force termination even with running processes
+- `sandboxId`: Sandbox to destroy (required)
+- `force` (optional): Force termination even with running processes (default: false)
 
 **Outputs:**
 ```json
 {
   "sandboxId": "string",
   "status": "destroyed",
+  "stoppedProcesses": ["process-name-1", "process-name-2"],
   "resourcesReleased": true,
+  "stateDeleted": true,
   "destroyedAt": "ISO8601 timestamp"
 }
 ```
 
 **Behavior:**
-- Stops all running processes
-- Clears all sandbox data
+- Terminates V8 isolate
+- Stops all running background processes
+- Deletes all sandbox state and data
 - Releases allocated resources
-- Returns confirmation of cleanup
+- Invalidates preview URLs
+- Returns confirmation of complete cleanup
 - Idempotent (safe to call multiple times)
+- Cannot be undone - all data is permanently deleted
+
+**Error Handling:**
+- If `force: false` and processes running, returns error
+- If sandbox not found, returns success (already destroyed)
+- Logs all cleanup operations for audit
 
 ---
 
-## Architecture
+### Technical Requirements
 
-### System Architecture
+#### V8 Isolate Architecture
 
-```
-┌─────────────────┐
-│   AI Agent      │
-│  (MCP Client)   │
-└────────┬────────┘
-         │ HTTPS/MCP
-         │
-┌────────▼────────────────────────────────────┐
-│  Cloudflare Worker (MCP Server)             │
-│  ┌──────────────────────────────────────┐   │
-│  │  MCP Handler (createMcpHandler)      │   │
-│  │  - Request routing                    │   │
-│  │  - Agent state management            │   │
-│  │  - Tool dispatch                     │   │
-│  └──────────────┬───────────────────────┘   │
-│                 │                            │
-│  ┌──────────────▼───────────────────────┐   │
-│  │  Sandbox Manager                     │   │
-│  │  - Instance lifecycle                │   │
-│  │  - Resource allocation               │   │
-│  │  - Process management                │   │
-│  └──────────────┬───────────────────────┘   │
-│                 │                            │
-│  ┌──────────────▼───────────────────────┐   │
-│  │  Authentication Layer                │   │
-│  │  - Bearer token validation           │   │
-│  │  - Wrangler secrets binding          │   │
-│  └──────────────────────────────────────┘   │
-└─────────────────┬───────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────┐
-│  Cloudflare Workers Runtime                 │
-│  ┌──────────────┐  ┌──────────────┐         │
-│  │  Sandbox 1   │  │  Sandbox 2   │  ...    │
-│  │  - Isolated  │  │  - Isolated  │         │
-│  │  - Ephemeral │  │  - Ephemeral │         │
-│  └──────────────┘  └──────────────┘         │
-└─────────────────────────────────────────────┘
-```
+**Performance Characteristics:**
+- **Cold Start Time**: ~1ms (V8 isolate initialization)
+- **Warm Start Time**: <100μs (reusing existing isolate)
+- **Memory Footprint**: 2-10MB per sandbox
+- **CPU Time**: Subject to Cloudflare Workers limits (50ms per request)
 
-### Component Overview
+**Isolation Features:**
+- Separate V8 isolates per sandbox
+- No shared memory between sandboxes
+- Sandboxed file system access
+- Restricted network egress (configurable)
+- Secure credential injection
 
-**1. MCP Handler**
-- Entry point for all MCP requests
-- Manages agent session state
-- Routes tool calls to appropriate handlers
-- Pattern follows txt2mcp's createMcpHandler implementation
+#### keepAlive Configuration
 
-**2. Sandbox Manager**
-- Core logic for sandbox lifecycle
-- Maintains sandbox registry
-- Handles resource allocation and cleanup
-- Implements keep-alive functionality
+**Purpose:** Maintain sandbox sessions for multiple operations without cold starts.
 
-**3. Authentication Layer**
-- Validates bearer tokens from requests
-- Accesses credentials via Wrangler secrets bindings
-- Provides ANTHROPIC credentials to sandboxes
-- Enforces security policies
-
-**4. Tool Handlers**
-- Individual implementations for each tool
-- Sandbox operation logic
-- Error handling and validation
-- Response formatting
-
-### Data Flow
-
-1. **Request Reception**
-   - MCP client sends HTTPS request to /mcp endpoint
-   - Worker receives and validates bearer token
-   - Request parsed as MCP protocol message
-
-2. **Tool Dispatch**
-   - MCP handler identifies requested tool
-   - Validates tool inputs
-   - Routes to appropriate handler
-
-3. **Sandbox Operations**
-   - Handler interacts with Sandbox Manager
-   - Operations executed within isolated sandbox
-   - Results captured and formatted
-
-4. **Response Return**
-   - Results packaged as MCP response
-   - Sent back to client over HTTPS
-   - Connection maintained for streaming if needed
-
-### State Management
-
-**Agent State:**
-- Managed by createMcpHandler
-- Tracks active sandboxes per agent
-- Session timeout handling
-- Cleanup on disconnect
-
-**Sandbox State:**
-- In-memory registry for active instances
-- Persistent metadata in KV (optional)
-- Health check polling
-- Automatic garbage collection
-
----
-
-## Technical Implementation
-
-### Technology Stack
-
-**Core Dependencies:**
-```json
-{
-  "@anthropic-ai/sdk": "latest",
-  "@cloudflare/workers-types": "latest",
-  "wrangler": "latest"
-}
-```
-
-**Development Tools:**
-- TypeScript for type safety
-- Vitest for testing
-- Wrangler CLI for deployment
-- MCP protocol libraries
-
-### Project Structure
-
-```
-sandbox-mcp/
-├── src/
-│   ├── server/
-│   │   ├── index.ts              # Main Worker entry point
-│   │   ├── mcp-handler.ts        # MCP protocol handler
-│   │   └── tools/
-│   │       ├── get-sandbox.ts    # getSandbox implementation
-│   │       ├── exec.ts           # exec implementation
-│   │       ├── start-process.ts  # startBackgroundProcess
-│   │       └── destroy.ts        # destroySandbox implementation
-│   ├── sandbox/
-│   │   ├── manager.ts            # Sandbox lifecycle management
-│   │   ├── runtime.ts            # Runtime environment setup
-│   │   └── isolation.ts          # Security and isolation logic
-│   ├── auth/
-│   │   ├── bearer.ts             # Bearer token validation
-│   │   └── secrets.ts            # Wrangler secrets access
-│   └── types/
-│       ├── mcp.ts                # MCP type definitions
-│       └── sandbox.ts            # Sandbox type definitions
-├── tests/
-│   ├── integration/
-│   └── unit/
-├── wrangler.toml                 # Cloudflare Worker config
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-### Reference Implementation (txt2mcp patterns)
-
-**1. MCP Handler Pattern:**
-```typescript
-import { createMcpHandler } from './lib/mcp-handler';
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    
-    if (url.pathname === '/mcp') {
-      return createMcpHandler({
-        tools: [
-          getSandboxTool,
-          execTool,
-          startProcessTool,
-          destroySandboxTool
-        ],
-        env,
-        request
-      });
-    }
-    
-    return new Response('Not Found', { status: 404 });
-  }
-};
-```
-
-**2. Tool Implementation Pattern:**
-```typescript
-export const execTool = {
-  name: 'exec',
-  description: 'Execute code within a sandbox environment',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      sandboxId: { type: 'string' },
-      command: { type: 'string' },
-      timeout: { type: 'number', default: 30 }
-    },
-    required: ['command']
-  },
-  handler: async (input, context) => {
-    // Implementation here
-  }
-};
-```
-
-**3. Authentication Pattern:**
-```typescript
-function validateBearerToken(request: Request, env: Env): boolean {
-  const authHeader = request.headers.get('Authorization');
-  const token = authHeader?.replace('Bearer ', '');
-  return token === env.SANDBOX_AUTH_TOKEN;
-}
-```
-
-### Sandbox Runtime Environment
-
-**Environment Variables Available in Sandbox:**
-```bash
-ANTHROPIC_API_KEY=<from-wrangler-secrets>
-SANDBOX_ID=<unique-identifier>
-SANDBOX_TIMEOUT=<max-execution-time>
-```
-
-**Resource Limits:**
-- CPU: 50ms per request (Workers limit)
-- Memory: 128MB per sandbox
-- Execution Time: 30s default, configurable
-- Concurrent Processes: 10 per sandbox
-
-### Keep-Alive Implementation
-
-**Purpose:** Maintain sandbox sessions for multiple operations
-
-**Mechanism:**
+**Configuration Options:**
 ```typescript
 interface KeepAliveConfig {
-  enabled: boolean;
-  timeoutMs: number;      // Default: 5 minutes
-  maxSandboxes: number;   // Default: 100
-}
-
-class SandboxManager {
-  private keepAliveSandboxes: Map<string, {
-    instance: Sandbox;
-    lastAccessed: number;
-  }>;
-  
-  async getOrCreateSandbox(id?: string): Promise<Sandbox> {
-    if (id && this.keepAliveSandboxes.has(id)) {
-      const entry = this.keepAliveSandboxes.get(id);
-      entry.lastAccessed = Date.now();
-      return entry.instance;
-    }
-    return this.createNewSandbox();
-  }
-  
-  async cleanupStale(): Promise<void> {
-    const now = Date.now();
-    for (const [id, entry] of this.keepAliveSandboxes) {
-      if (now - entry.lastAccessed > this.config.timeoutMs) {
-        await this.destroySandbox(id);
-      }
-    }
-  }
+  enabled: boolean;           // Enable persistent sandbox
+  timeoutMs: number;          // Session timeout (default: 300000 = 5 min)
+  maxIdleTime: number;        // Max time without activity (default: 600000 = 10 min)
+  maxSandboxes: number;       // Max concurrent keep-alive sandboxes (default: 100)
 }
 ```
 
----
+**Behavior:**
+- Sandboxes remain active after operations complete
+- Automatic cleanup after timeout period
+- Efficient resource utilization
+- State preserved between calls
+- Background processes continue running
 
-## API Design
+**Implementation:**
+```typescript
+// Create persistent sandbox
+const sandbox = await getSandbox({ 
+  keepAlive: true, 
+  timeoutMs: 600000  // 10 minutes
+});
 
-### Endpoint Specification
-
-**Base URL:** `https://sandbox-mcp.<your-subdomain>.workers.dev`
-
-**Single Endpoint:** `/mcp`
-
-**Method:** POST
-
-**Authentication:** Bearer token in Authorization header
-
-**Content-Type:** application/json
-
-### Request Format
-
-All requests follow MCP protocol specification:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "exec",
-    "arguments": {
-      "sandboxId": "optional-sandbox-id",
-      "command": "echo 'Hello, World!'"
-    }
-  },
-  "id": 1
-}
+// Execute multiple operations without recreating
+await exec({ sandboxId: sandbox.sandboxId, code: 'console.log("First")' });
+await exec({ sandboxId: sandbox.sandboxId, code: 'console.log("Second")' });
 ```
 
-### Response Format
+#### Preview URLs
 
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Execution result..."
-      }
-    ]
-  },
-  "id": 1
-}
-```
+**Purpose:** Expose services running in sandboxes via public URLs.
 
-### Error Handling
+**Characteristics:**
+- Automatically generated for services binding to ports
+- Format: `https://{random-id}.workers.dev`
+- HTTPS enabled by default
+- CORS headers configurable
+- Lifetime tied to sandbox lifecycle
 
-**Error Response Format:**
-```json
-{
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32000,
-    "message": "Sandbox not found",
-    "data": {
-      "sandboxId": "requested-id",
-      "availableSandboxes": []
-    }
-  },
-  "id": 1
-}
-```
+**Use Cases:**
+- Testing web applications
+- Sharing API endpoints
+- Temporary service hosting
+- AI agent web interactions
 
-**Error Codes:**
-- `-32000`: Server error (general)
-- `-32001`: Sandbox not found
-- `-32002`: Execution timeout
-- `-32003`: Resource limit exceeded
-- `-32004`: Invalid command
-- `-32600`: Invalid request
-- `-32700`: Parse error
-
-### Rate Limiting
-
-**Limits:**
-- 100 requests per minute per token
-- 10 concurrent sandboxes per token
-- 1000 sandbox operations per hour
-
-**Response Headers:**
-```
-X-RateLimit-Limit: 100
-X-RateLimit-Remaining: 95
-X-RateLimit-Reset: 1234567890
-```
-
----
-
-## Security & Authentication
-
-### Authentication Model
+#### Authentication & Credentials
 
 **Bearer Token Authentication:**
-- Each client receives unique bearer token
-- Tokens stored as Wrangler secrets
-- Validated on every request
+- Single authentication mechanism via Authorization header
+- Token stored as Wrangler secret binding
+- Validated on every /mcp request
 - No token expiration (managed externally)
 
-**Token Management:**
-```bash
-# Set token in Wrangler
-wrangler secret put SANDBOX_AUTH_TOKEN
-
-# Access in Worker
-export default {
-  async fetch(request, env) {
-    const token = request.headers.get('Authorization')?.replace('Bearer ', '');
-    if (token !== env.SANDBOX_AUTH_TOKEN) {
-      return new Response('Unauthorized', { status: 401 });
-    }
-  }
-}
-```
-
-### Sandbox Isolation
-
-**Security Boundaries:**
-1. **Process Isolation**: Each sandbox runs in separate Worker context
-2. **Memory Isolation**: No shared memory between sandboxes
-3. **Network Isolation**: Sandboxes cannot communicate directly
-4. **Filesystem Isolation**: Ephemeral, non-persistent storage
-
-**Restrictions:**
-- No access to Worker secrets from sandbox code
-- Limited network egress (allow-listed domains only)
-- No system calls or native binaries
-- Enforced resource limits
-
-### Credential Management
-
-**ANTHROPIC Credentials:**
+**ANTHROPIC Credentials Injection:**
 ```typescript
-// Available in sandbox environment
-const anthropicKey = env.ANTHROPIC_API_KEY;
+// Credentials available in sandbox via env
+process.env.ANTHROPIC_API_KEY  // Injected from Wrangler secrets
 
-// Injected from Wrangler secrets
-// wrangler secret put ANTHROPIC_API_KEY
-```
-
-**Secret Binding:**
-```toml
-# wrangler.toml
+// Configured in wrangler.toml
 [vars]
-ENVIRONMENT = "production"
+# Public variables
 
 # Secrets (set via CLI)
 # - SANDBOX_AUTH_TOKEN
 # - ANTHROPIC_API_KEY
 ```
 
-### Security Best Practices
-
-1. **Input Validation**: Sanitize all user inputs before execution
-2. **Output Sanitization**: Strip sensitive data from responses
-3. **Audit Logging**: Log all sandbox operations with timestamps
-4. **Rate Limiting**: Prevent abuse through request throttling
-5. **Timeout Enforcement**: Prevent infinite loops and hangs
-6. **Resource Monitoring**: Track and limit resource consumption
-
-### Compliance Considerations
-
-- **Data Residency**: Sandboxes run in Cloudflare's global network
-- **Data Retention**: No persistent storage, data cleared on destroy
-- **Audit Trail**: Request logs retained for 30 days
-- **Access Control**: Token-based, no user accounts
+**Security Model:**
+- Secrets never exposed in responses
+- Isolated per sandbox execution
+- Encrypted at rest via Cloudflare
+- Audit logging for access
 
 ---
 
-## Deployment Instructions
+## Technical Architecture
 
-### Prerequisites
+### System Architecture
 
-1. **Cloudflare Account**: Active account with Workers enabled
-2. **Wrangler CLI**: Version 3.0 or higher installed
-3. **Node.js**: Version 18 or higher
-4. **Git**: For version control
-
-### Initial Setup
-
-**1. Install Dependencies:**
-```bash
-npm install
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      AI Agent (MCP Client)                   │
+│                   (Claude, Custom Agents)                    │
+└────────────────────────────┬────────────────────────────────┘
+                             │ HTTPS/MCP Protocol
+                             │ Bearer Token Auth
+                             │
+┌────────────────────────────▼────────────────────────────────┐
+│           Cloudflare Worker (MCP Server)                    │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Single /mcp Endpoint                                 │  │
+│  │  - MCP request routing                                │  │
+│  │  - Tool dispatch                                      │  │
+│  └────────────────────────┬──────────────────────────────┘  │
+│                           │                                 │
+│  ┌────────────────────────▼──────────────────────────────┐  │
+│  │  createMcpHandler (txt2mcp pattern)                   │  │
+│  │  - Agent state management                             │  │
+│  │  - Session handling                                   │  │
+│  │  - Error handling                                     │  │
+│  └────────────────────────┬──────────────────────────────┘  │
+│                           │                                 │
+│  ┌────────────────────────▼──────────────────────────────┐  │
+│  │  Tool Handlers                                        │  │
+│  │  - getSandbox()   - startBackgroundProcess            │  │
+│  │  - exec           - destroy()                         │  │
+│  └────────────────────────┬──────────────────────────────┘  │
+│                           │                                 │
+│  ┌────────────────────────▼──────────────────────────────┐  │
+│  │  Sandbox Manager                                      │  │
+│  │  - keepAlive tracking                                 │  │
+│  │  - Resource management                                │  │
+│  │  - Credential injection                               │  │
+│  └────────────────────────┬──────────────────────────────┘  │
+│                           │                                 │
+│  ┌────────────────────────▼──────────────────────────────┐  │
+│  │  Authentication Layer                                 │  │
+│  │  - Bearer token validation (Wrangler secrets)         │  │
+│  │  - ANTHROPIC_API_KEY binding                          │  │
+│  └───────────────────────────────────────────────────────┘  │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+┌────────────────────────────▼────────────────────────────────┐
+│         Cloudflare Sandbox API (V8 Isolates)                │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │  Sandbox 1   │  │  Sandbox 2   │  │  Sandbox N   │      │
+│  │  ~1ms start  │  │  ~1ms start  │  │  ~1ms start  │      │
+│  │  keepAlive   │  │  Ephemeral   │  │  Background  │      │
+│  │  + ANTHROPIC │  │  + ANTHROPIC │  │  Processes   │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│                                                              │
+│  Preview URLs:                                               │
+│  https://abc123.workers.dev -> Sandbox 1 (port 8080)        │
+│  https://xyz789.workers.dev -> Sandbox N (port 3000)        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**2. Configure Wrangler:**
-```bash
-# Login to Cloudflare
-wrangler login
+### Architecture Highlights
 
-# Set account ID in wrangler.toml or use:
-wrangler whoami
+**Single Endpoint Design:**
+- Only `/mcp` endpoint needed (following txt2mcp pattern)
+- All MCP tools accessible through same endpoint
+- Simplifies deployment and maintenance
+- Reduces routing complexity
+
+**Agent State Management:**
+- `createMcpHandler` manages agent sessions
+- Tracks active sandboxes per agent
+- Handles disconnections and cleanup
+- Session timeout management
+
+**Sandbox Lifecycle:**
+```
+1. Agent requests sandbox operation
+2. MCP handler validates and routes request
+3. Sandbox Manager retrieves or creates V8 isolate (~1ms)
+4. Credentials injected from Wrangler secrets
+5. Code executed within isolated environment
+6. Results returned to agent
+7. Sandbox kept alive or destroyed based on config
 ```
 
-**3. Set Secrets:**
-```bash
-# Set authentication token
-wrangler secret put SANDBOX_AUTH_TOKEN
-# Enter: your-secure-token
+**Resource Management:**
+- Automatic garbage collection of expired sandboxes
+- Keep-alive tracking for active sessions
+- Background process monitoring
+- Memory and CPU limit enforcement
 
-# Set Anthropic API key
-wrangler secret put ANTHROPIC_API_KEY
-# Enter: your-anthropic-key
+### Data Flow
+
+**Request Flow:**
+```
+AI Agent 
+  → HTTPS POST /mcp 
+  → Bearer Token Validation 
+  → MCP Protocol Parsing 
+  → Tool Dispatch (getSandbox|exec|startBackgroundProcess|destroy)
+  → Sandbox Manager 
+  → V8 Isolate Operation
+  → Response Formatting
+  → HTTPS Response
 ```
 
-### Development Deployment
-
-**Local Development:**
-```bash
-# Start local dev server
-npm run dev
-
-# Or directly with wrangler
-wrangler dev
-
-# Test endpoint
-curl -X POST http://localhost:8787/mcp \
-  -H "Authorization: Bearer your-token" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+**Credential Flow:**
+```
+Wrangler CLI (secret set)
+  → Cloudflare Secret Store
+  → Worker Env Binding
+  → Sandbox Environment Injection
+  → Available as process.env.ANTHROPIC_API_KEY
 ```
 
-**Environment Variables (local):**
-```bash
-# .dev.vars file
-SANDBOX_AUTH_TOKEN=dev-token-123
-ANTHROPIC_API_KEY=sk-dev-key
+### Integration with Cloudflare Sandbox SDK
+
+**SDK Usage:**
+```typescript
+import { Sandbox } from '@cloudflare/sandbox-sdk';
+
+// Initialize sandbox (from SDK docs)
+const sandbox = await Sandbox.create({
+  keepAlive: true,
+  timeoutMs: 300000,
+  env: {
+    ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY
+  }
+});
+
+// Execute code
+const result = await sandbox.exec({
+  code: 'console.log("Hello from V8!")'
+});
+
+// Start background process
+const process = await sandbox.startBackgroundProcess({
+  command: 'node server.js',
+  name: 'web-server'
+});
+
+// Get sandbox info
+const info = await sandbox.getSandbox();
+
+// Cleanup
+await sandbox.destroy();
 ```
 
-### Production Deployment
+**SDK Documentation Mapping:**
+- **Lifecycle**: https://developers.cloudflare.com/sandbox/api/lifecycle/
+- **Options**: https://developers.cloudflare.com/sandbox/configuration/sandbox-options/
+- **API Reference**: https://developers.cloudflare.com/sandbox/api/
 
-**1. Deploy Worker:**
-```bash
-# Deploy to production
-npm run deploy
+### Comparison with txt2mcp
 
-# Or with wrangler
-wrangler deploy
+**Similarities:**
+- Single `/mcp` endpoint architecture
+- `createMcpHandler` for agent state management
+- Bearer token authentication via Wrangler secrets
+- Cloudflare Workers deployment
+- TypeScript implementation
+- Minimal external dependencies
 
-# View deployment
-wrangler deployments list
-```
+**Differences:**
 
-**2. Verify Deployment:**
-```bash
-# Check Worker status
-wrangler tail
-
-# Test production endpoint
-curl -X POST https://sandbox-mcp.your-subdomain.workers.dev/mcp \
-  -H "Authorization: Bearer your-production-token" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
-```
-
-**3. Configure Custom Domain (Optional):**
-```bash
-# Add custom domain
-wrangler publish --routes "sandbox.yourdomain.com/*"
-```
-
-### Configuration
-
-**wrangler.toml:**
-```toml
-name = "sandbox-mcp"
-main = "src/server/index.ts"
-compatibility_date = "2025-01-01"
-compatibility_flags = ["nodejs_compat"]
-
-[build]
-command = "npm run build"
-
-[env.production]
-name = "sandbox-mcp-prod"
-vars = { ENVIRONMENT = "production" }
-
-[env.staging]
-name = "sandbox-mcp-staging"
-vars = { ENVIRONMENT = "staging" }
-```
-
-### Monitoring & Observability
-
-**1. Enable Analytics:**
-```bash
-# View analytics dashboard
-wrangler pages deployment tail
-```
-
-**2. Set Up Alerts:**
-- Configure alerts in Cloudflare dashboard
-- Set thresholds for error rates, latency
-- Email/webhook notifications
-
-**3. Logging:**
-```bash
-# Tail logs in real-time
-wrangler tail --format pretty
-
-# Filter specific sandboxes
-wrangler tail --search "sandboxId:xyz"
-```
-
-### Rollback Procedure
-
-**1. List Deployments:**
-```bash
-wrangler deployments list
-```
-
-**2. Rollback to Previous:**
-```bash
-wrangler rollback [deployment-id]
-```
-
-### Scaling Considerations
-
-**Cloudflare Workers Auto-Scaling:**
-- Automatic scaling across global network
-- No manual configuration needed
-- Pay-per-request pricing
-
-**Resource Limits:**
-- 100,000 requests per day (free tier)
-- Unlimited on paid plans
-- 128MB memory per Worker
-- 50ms CPU time per request
+| Aspect | txt2mcp | sandbox-mcp |
+|--------|---------|-------------|
+| **Purpose** | Text file to MCP conversion | Code execution in sandboxes |
+| **State** | Stateless transformations | Stateful sandbox management |
+| **Complexity** | Simple file operations | Complex lifecycle management |
+| **Resources** | Minimal (text processing) | Managed V8 isolates |
+| **Credentials** | Not required | ANTHROPIC key injection |
+| **Persistence** | None | keepAlive session support |
 
 ---
 
-## Implementation Timeline
+## Implementation Plan
 
 ### Phase 1: Foundation (Weeks 1-2)
 
-**Week 1:**
-- [ ] Project setup and repository initialization
-- [ ] Configure Wrangler and Cloudflare Workers environment
-- [ ] Implement basic MCP handler using txt2mcp patterns
-- [ ] Set up authentication layer with bearer tokens
-- [ ] Create basic project structure and type definitions
+**Week 1: Project Setup & Authentication**
+- [ ] Initialize project repository with TypeScript configuration
+- [ ] Configure Wrangler for Cloudflare Workers deployment
+- [ ] Set up Wrangler secrets for bearer token and ANTHROPIC key
+- [ ] Implement basic `/mcp` endpoint handler
+- [ ] Create bearer token authentication middleware
+- [ ] Write initial unit tests for authentication
 
-**Week 2:**
-- [ ] Implement Sandbox Manager core functionality
-- [ ] Build sandbox lifecycle management (create, track, destroy)
-- [ ] Set up Wrangler secrets integration
-- [ ] Write unit tests for core components
-- [ ] Documentation: Architecture overview
+**Week 2: MCP Handler Implementation**
+- [ ] Implement `createMcpHandler` following txt2mcp pattern
+- [ ] Set up MCP protocol parsing and response formatting
+- [ ] Create tool registration system
+- [ ] Implement agent state management
+- [ ] Add error handling and logging
+- [ ] Document MCP handler architecture
 
 **Deliverables:**
-- Working MCP endpoint with authentication
-- Basic sandbox creation and destruction
+- Working `/mcp` endpoint with authentication
+- MCP protocol handler
 - Initial test suite
-- Architecture documentation
+- Project structure documentation
 
 ---
 
-### Phase 2: Core Tools (Weeks 3-4)
+### Phase 2: Core Sandbox Integration (Weeks 3-4)
 
-**Week 3:**
-- [ ] Implement `getSandbox` tool
-  - Sandbox registry and status tracking
-  - Resource utilization metrics
-  - Health check implementation
-- [ ] Implement `destroySandbox` tool
-  - Cleanup logic
-  - Resource deallocation
-  - Idempotency handling
-- [ ] Integration tests for basic tools
+**Week 3: Cloudflare Sandbox SDK Integration**
+- [ ] Install and configure `@cloudflare/sandbox-sdk`
+- [ ] Implement Sandbox Manager class
+- [ ] Create sandbox instance registry
+- [ ] Implement `getSandbox()` tool
+  - Get existing sandbox by ID
+  - Create new sandbox with V8 isolate
+  - Return sandbox metadata and status
+- [ ] Implement `destroy()` tool
+  - Terminate V8 isolate
+  - Clean up all resources
+  - Delete state completely
+- [ ] Write integration tests for basic lifecycle
 
-**Week 4:**
+**Week 4: Code Execution & Background Processes**
 - [ ] Implement `exec` tool
-  - Command execution logic
-  - Output capture (stdout/stderr)
+  - Code execution within V8 isolate
+  - stdout/stderr capture
   - Timeout enforcement
   - Error handling
 - [ ] Implement `startBackgroundProcess` tool
   - Process lifecycle management
-  - Restart policies
+  - Preview URL generation
   - Process monitoring
-- [ ] Integration tests for execution tools
+  - Restart policy support
+- [ ] Add ANTHROPIC credential injection
+- [ ] Integration tests for all four tools
 
 **Deliverables:**
 - All four core tools functional
+- Sandbox SDK integration complete
 - Comprehensive test coverage
-- Tool documentation and examples
+- Tool documentation with examples
 
 ---
 
-### Phase 3: Advanced Features (Weeks 5-6)
+### Phase 3: keepAlive & Advanced Features (Weeks 5-6)
 
-**Week 5:**
-- [ ] Implement keep-alive functionality
-  - Session management
-  - Timeout configuration
-  - Stale sandbox cleanup
-- [ ] Add streaming support for long-running commands
-- [ ] Implement rate limiting
-- [ ] Performance optimization
+**Week 5: keepAlive Implementation**
+- [ ] Design keepAlive session tracking system
+- [ ] Implement session timeout logic
+- [ ] Create automatic garbage collection for expired sandboxes
+- [ ] Add keepAlive configuration options
+- [ ] Implement stale sandbox cleanup job
+- [ ] Performance testing with persistent sandboxes
+- [ ] Document keepAlive best practices
 
-**Week 6:**
-- [ ] ANTHROPIC credentials injection
-- [ ] Enhanced error handling and logging
+**Week 6: Preview URLs & Polish**
+- [ ] Implement preview URL management
+- [ ] Add service port detection
+- [ ] Configure CORS for preview URLs
+- [ ] Enhanced error messages and logging
+- [ ] Rate limiting implementation
 - [ ] Resource monitoring and metrics
 - [ ] Load testing and optimization
-- [ ] Security audit
 
 **Deliverables:**
-- Keep-alive feature complete
+- keepAlive feature fully functional
+- Preview URL support
 - Performance benchmarks
-- Security documentation
 - Monitoring dashboards
+- Rate limiting system
 
 ---
 
-### Phase 4: Polish & Launch (Weeks 7-8)
+### Phase 4: Testing & Documentation (Weeks 7-8)
 
-**Week 7:**
-- [ ] End-to-end testing
-- [ ] Documentation completion
-  - API reference
-  - Usage examples
-  - Integration guides
-- [ ] Example client implementations
-- [ ] Beta testing with select users
+**Week 7: Comprehensive Testing**
+- [ ] End-to-end integration tests
+- [ ] Load testing with multiple concurrent sandboxes
+- [ ] Security testing and penetration testing
+- [ ] Edge case handling verification
+- [ ] Performance profiling and optimization
+- [ ] Beta testing with AI agents
+- [ ] Bug fixes from testing
 
-**Week 8:**
-- [ ] Address beta feedback
-- [ ] Final security review
-- [ ] Performance tuning
+**Week 8: Documentation & Launch**
+- [ ] Complete API reference documentation
+- [ ] Write usage examples and tutorials
+- [ ] Create integration guide for AI agents
+- [ ] Add troubleshooting guide
+- [ ] Record demo videos
+- [ ] Prepare launch announcement
 - [ ] Production deployment
-- [ ] Public launch
+- [ ] Post-launch monitoring setup
 
 **Deliverables:**
 - Production-ready system
 - Complete documentation
 - Example integrations
-- Launch announcement
+- Launch materials
+- Monitoring and alerting configured
 
 ---
 
-### Maintenance & Iteration (Ongoing)
+### Post-Launch: Maintenance & Iteration
 
-**Post-Launch:**
+**Ongoing Activities:**
 - Monitor system performance and errors
-- Collect user feedback
-- Bug fixes and patches
+- Collect user feedback from AI agent integrations
+- Bug fixes and security patches
+- Performance optimizations
 - Feature enhancements based on usage patterns
-- Regular security updates
 
 **Quarterly Reviews:**
-- Performance analysis
-- Cost optimization
-- Feature roadmap updates
+- Performance analysis and optimization
+- Cost analysis and optimization
 - Security audits
+- Feature roadmap updates
+- User satisfaction assessment
 
 ---
 
@@ -941,263 +741,345 @@ wrangler rollback [deployment-id]
 
 ### Performance Metrics
 
-**Latency:**
-- P50 latency: < 50ms
-- P95 latency: < 100ms
-- P99 latency: < 200ms
+**Latency (Critical for AI Agents):**
+- Cold start time: ~1ms (V8 isolate target)
+- Warm start time: <100μs
+- P50 operation latency: < 50ms
+- P95 operation latency: < 100ms
+- P99 operation latency: < 200ms
 
 **Throughput:**
-- 1000+ requests per second
-- 100+ concurrent sandboxes
-- 99.9% success rate
+- 10,000+ requests per second per Worker
+- 1,000+ concurrent sandboxes supported
+- 100+ background processes per sandbox
+- 99.95% success rate
 
 **Resource Utilization:**
-- < 10MB memory per sandbox
-- < 100ms CPU time per operation
-- < 1s sandbox creation time
+- 2-10MB memory per sandbox
+- <50ms CPU time per operation (Workers limit)
+- Automatic garbage collection effectiveness >95%
 
 ### Reliability Metrics
 
 **Availability:**
-- 99.9% uptime
-- < 1 hour downtime per month
+- 99.9% uptime (leveraging Cloudflare infrastructure)
+- <5 minutes downtime per month
 - Zero data loss
+- <1 second failover time
 
 **Error Rates:**
-- < 0.1% error rate
-- < 0.01% timeout rate
+- <0.1% error rate overall
+- <0.01% timeout rate
 - Zero security incidents
+- Zero cross-sandbox data leakage
 
 ### Usage Metrics
 
-**Adoption:**
-- 100+ active users in first month
-- 10,000+ sandbox operations per day
-- 10+ integrations built
+**Adoption (First 3 Months):**
+- 50+ AI agent integrations
+- 100,000+ sandbox operations per day
+- 20+ production deployments
+- 10+ open-source projects using sandbox-mcp
 
 **Engagement:**
-- 70%+ retention rate
-- Daily active users growing
-- Positive user feedback
+- 80%+ retention rate for weekly active users
+- Daily active agent sessions growing
+- Positive developer feedback (4.5+ stars)
+- Active community contributions
 
 ### Business Metrics
 
 **Cost Efficiency:**
-- < $0.01 per 1000 requests
-- Automated scaling reduces waste
-- Predictable pricing model
+- <$0.005 per 1,000 requests (Cloudflare Workers pricing)
+- Efficient resource utilization via keepAlive
+- Predictable scaling costs
+- ROI positive within 6 months
 
 **Developer Experience:**
-- < 15 minutes to first sandbox
-- < 1 hour to full integration
+- <10 minutes to first sandbox execution
+- <30 minutes to full integration
 - 90%+ developer satisfaction
+- <24 hour support response time
 
----
+### Technical Quality Metrics
 
-## Risk Assessment
+**Code Quality:**
+- 90%+ test coverage
+- Zero critical vulnerabilities
+- <5% code churn per sprint
+- All TypeScript strict mode enabled
 
-### Technical Risks
-
-**1. Sandbox Escape**
-- **Risk Level:** HIGH
-- **Impact:** Security breach, data exposure
-- **Mitigation:**
-  - Multiple layers of isolation
-  - Regular security audits
-  - Cloudflare Workers built-in isolation
-  - Restricted system calls
-
-**2. Resource Exhaustion**
-- **Risk Level:** MEDIUM
-- **Impact:** Service degradation, increased costs
-- **Mitigation:**
-  - Strict resource limits per sandbox
-  - Automatic garbage collection
-  - Rate limiting
-  - Monitoring and alerting
-
-**3. API Rate Limits (Cloudflare/Anthropic)**
-- **Risk Level:** MEDIUM
-- **Impact:** Service interruption
-- **Mitigation:**
-  - Request queuing
-  - Exponential backoff
-  - Multiple API keys (if allowed)
-  - Clear error messaging
-
-**4. Cold Start Latency**
-- **Risk Level:** LOW
-- **Impact:** User experience degradation
-- **Mitigation:**
-  - Keep-alive for warm sandboxes
-  - Cloudflare's global distribution
-  - Optimize Worker bundle size
-  - Pre-warming strategies
-
-### Operational Risks
-
-**5. Deployment Failures**
-- **Risk Level:** MEDIUM
-- **Impact:** Service interruption
-- **Mitigation:**
-  - Automated testing before deploy
-  - Staging environment
-  - Rollback procedures
-  - Gradual rollout strategy
-
-**6. Secret Management**
-- **Risk Level:** HIGH
-- **Impact:** Credential exposure
-- **Mitigation:**
-  - Wrangler secrets (encrypted)
-  - No secrets in code or logs
-  - Regular rotation
-  - Access auditing
-
-**7. Monitoring Blind Spots**
-- **Risk Level:** LOW
-- **Impact:** Undetected issues
-- **Mitigation:**
-  - Comprehensive logging
-  - Real-time alerting
-  - Multiple monitoring tools
-  - Regular reviews
-
-### Business Risks
-
-**8. Cloudflare Dependency**
-- **Risk Level:** MEDIUM
-- **Impact:** Vendor lock-in
-- **Mitigation:**
-  - Abstract Workers-specific code
-  - Maintain migration plan
-  - Monitor pricing changes
-  - Alternative platforms researched
-
-**9. Compliance Issues**
-- **Risk Level:** LOW
-- **Impact:** Legal complications
-- **Mitigation:**
-  - Clear terms of service
-  - Data handling documentation
-  - No persistent user data
-  - Regular compliance reviews
-
----
-
-## Future Considerations
-
-### Near-Term Enhancements (3-6 months)
-
-**1. Multi-Language Support**
-- Python, Go, Rust runtimes
-- Language-specific optimizations
-- Runtime switching API
-
-**2. Persistent Storage**
-- Optional KV or R2 integration
-- Session persistence
-- Artifact storage
-
-**3. Enhanced Monitoring**
-- Real-time metrics dashboard
-- Usage analytics
-- Cost tracking per sandbox
-
-**4. Collaboration Features**
-- Shared sandboxes
-- Multi-user access
-- Permission management
-
-### Long-Term Vision (6-12 months)
-
-**5. Advanced Orchestration**
-- Multi-sandbox workflows
-- Inter-sandbox communication
-- Distributed execution
-
-**6. Marketplace**
-- Pre-configured sandbox templates
-- Community-contributed tools
-- Plugin ecosystem
-
-**7. Enterprise Features**
-- SSO integration
-- Advanced compliance tools
-- Custom resource limits
-- Dedicated instances
-
-**8. AI-Specific Optimizations**
-- Model fine-tuning environments
-- Vector database integration
-- RAG-specific tooling
-
-### Research & Experimentation
-
-**Areas to Explore:**
-- WebAssembly for better isolation
-- GPU access for ML workloads
-- Edge-native AI inference
-- Distributed tracing across sandboxes
+**Documentation Quality:**
+- 100% API documentation coverage
+- 5+ detailed examples per tool
+- <2 hours time-to-understanding for new developers
+- Video tutorials for common use cases
 
 ---
 
 ## Appendices
 
-### Appendix A: Glossary
+### Appendix A: Tool Specifications Summary
 
-- **MCP**: Model Context Protocol - standardized protocol for AI agent interactions
-- **Wrangler**: Cloudflare's CLI tool for managing Workers
-- **Bearer Token**: Authentication token passed in HTTP headers
-- **Keep-Alive**: Mechanism to maintain sandbox sessions
-- **Sandbox**: Isolated execution environment for code
-- **Workers**: Cloudflare's serverless compute platform
+| Tool | Purpose | Cold Start | keepAlive Support | Credentials |
+|------|---------|------------|-------------------|-------------|
+| `getSandbox()` | Get or create sandbox | ~1ms | ✅ Yes | ANTHROPIC injected |
+| `exec` | Execute code | ~1ms (if new) | ✅ Yes | Available in env |
+| `startBackgroundProcess` | Launch process | Requires existing | ✅ Yes | Available in env |
+| `destroy()` | Terminate & cleanup | N/A | Ends session | N/A |
 
-### Appendix B: References
+### Appendix B: Configuration Examples
 
-- [Model Context Protocol Specification](https://modelcontextprotocol.io)
-- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
-- [Wrangler CLI Reference](https://developers.cloudflare.com/workers/wrangler/)
-- [txt2mcp Reference Implementation](https://github.com/anthropics/txt2mcp)
-- [Anthropic API Documentation](https://docs.anthropic.com/)
+**wrangler.toml:**
+```toml
+name = "sandbox-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
 
-### Appendix C: Comparison with txt2mcp
+[vars]
+ENVIRONMENT = "production"
+MAX_SANDBOX_LIFETIME_MS = "3600000"  # 1 hour
+DEFAULT_KEEP_ALIVE_MS = "300000"     # 5 minutes
 
-**Similarities:**
-- MCP protocol implementation
-- createMcpHandler pattern
-- Bearer token authentication
-- Cloudflare Workers deployment
-- Single /mcp endpoint
+# Secrets set via: wrangler secret put <NAME>
+# - SANDBOX_AUTH_TOKEN
+# - ANTHROPIC_API_KEY
+```
 
-**Differences:**
-- txt2mcp: Text transformation focus
-- sandbox-mcp: Code execution focus
-- Additional complexity: Process management
-- Different tool set requirements
-- Enhanced security considerations
+**Environment Setup:**
+```bash
+# Set authentication token
+wrangler secret put SANDBOX_AUTH_TOKEN
+# Enter: your-secure-bearer-token
 
-### Appendix D: Example Integration
+# Set Anthropic API key
+wrangler secret put ANTHROPIC_API_KEY
+# Enter: sk-ant-api-...
+```
 
+### Appendix C: Example MCP Client Integration
+
+**Using Claude Desktop with sandbox-mcp:**
+
+```json
+// claude_desktop_config.json
+{
+  "mcpServers": {
+    "sandbox": {
+      "url": "https://sandbox-mcp.your-subdomain.workers.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer your-token-here"
+      }
+    }
+  }
+}
+```
+
+**Programmatic Usage:**
 ```typescript
-// Example MCP client usage
-import { MCPClient } from '@anthropic/mcp-client';
+import { MCPClient } from '@anthropic-ai/mcp-client';
 
 const client = new MCPClient({
-  endpoint: 'https://sandbox-mcp.example.workers.dev/mcp',
+  endpoint: 'https://sandbox-mcp.your-subdomain.workers.dev/mcp',
   auth: {
     bearer: process.env.SANDBOX_AUTH_TOKEN
   }
 });
 
-// Create and execute in sandbox
+// Create persistent sandbox
+const sandbox = await client.callTool('getSandbox', {
+  keepAlive: true,
+  timeoutMs: 600000
+});
+
+// Execute code with Anthropic API
 const result = await client.callTool('exec', {
-  command: 'npm install && npm test',
+  sandboxId: sandbox.sandboxId,
+  code: `
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY
+    });
+    
+    const message = await client.messages.create({
+      model: 'claude-3-sonnet-20240229',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: 'Write hello world in 5 languages' }]
+    });
+    
+    console.log(message.content[0].text);
+  `,
   timeout: 60
 });
 
 console.log(result.stdout);
+
+// Start a background web server
+const process = await client.callTool('startBackgroundProcess', {
+  sandboxId: sandbox.sandboxId,
+  command: 'node -e "require(\'http\').createServer((req,res) => res.end(\'Hello\')).listen(8080)"',
+  name: 'web-server'
+});
+
+console.log('Preview URL:', process.previewUrl);
+
+// Cleanup when done
+await client.callTool('destroy', {
+  sandboxId: sandbox.sandboxId
+});
 ```
+
+### Appendix D: Security Best Practices
+
+**1. Token Management:**
+- Never commit tokens to version control
+- Rotate tokens quarterly
+- Use separate tokens for dev/staging/production
+- Audit token usage regularly
+
+**2. Sandbox Isolation:**
+- Each sandbox runs in separate V8 isolate
+- No shared state between sandboxes
+- Network egress restrictions enforced
+- File system access sandboxed
+
+**3. Credential Handling:**
+- ANTHROPIC keys stored as Wrangler secrets
+- Never log credentials
+- Automatic redaction in error messages
+- Encrypted at rest and in transit
+
+**4. Input Validation:**
+- Sanitize all code inputs
+- Enforce resource limits
+- Timeout all operations
+- Validate sandbox IDs
+
+**5. Monitoring & Auditing:**
+- Log all sandbox operations
+- Monitor for abuse patterns
+- Alert on anomalies
+- Retain logs for 90 days
+
+### Appendix E: Troubleshooting Guide
+
+**Common Issues:**
+
+**1. Sandbox Creation Fails**
+```
+Error: Failed to create sandbox
+Cause: Cloudflare Workers limits exceeded
+Solution: Check quota, implement rate limiting
+```
+
+**2. keepAlive Not Working**
+```
+Error: Sandbox expired despite keepAlive
+Cause: Timeout too short or system cleanup
+Solution: Increase timeoutMs, check logs
+```
+
+**3. ANTHROPIC Credentials Missing**
+```
+Error: ANTHROPIC_API_KEY not found
+Cause: Secret not set in Wrangler
+Solution: wrangler secret put ANTHROPIC_API_KEY
+```
+
+**4. Preview URL Not Generated**
+```
+Error: No preview URL for process
+Cause: Process not binding to expected port
+Solution: Check process logs, ensure port 8080
+```
+
+**5. Authentication Failures**
+```
+Error: 401 Unauthorized
+Cause: Invalid bearer token
+Solution: Verify token matches Wrangler secret
+```
+
+### Appendix F: Performance Optimization Tips
+
+**1. Use keepAlive for Repeated Operations:**
+```typescript
+// ✅ Good: Reuse sandbox
+const sandbox = await getSandbox({ keepAlive: true });
+for (const code of codeSnippets) {
+  await exec({ sandboxId: sandbox.sandboxId, code });
+}
+
+// ❌ Bad: Create new sandbox each time
+for (const code of codeSnippets) {
+  await exec({ code });  // New sandbox = ~1ms each time
+}
+```
+
+**2. Batch Operations:**
+```typescript
+// Execute multiple operations before destroying
+const results = [];
+for (const task of tasks) {
+  results.push(await exec({ sandboxId, code: task }));
+}
+await destroy({ sandboxId });
+```
+
+**3. Background Processes for Long Tasks:**
+```typescript
+// Use startBackgroundProcess for >30s tasks
+await startBackgroundProcess({
+  sandboxId,
+  command: 'node long-running-task.js',
+  name: 'background-job'
+});
+// Poll status via getSandbox()
+```
+
+**4. Efficient Resource Cleanup:**
+```typescript
+// Always destroy when done to free resources
+try {
+  await exec({ sandboxId, code });
+} finally {
+  await destroy({ sandboxId });
+}
+```
+
+### Appendix G: Glossary
+
+- **MCP**: Model Context Protocol - standardized protocol for AI agent interactions
+- **V8 Isolate**: Lightweight JavaScript execution environment with strong isolation
+- **keepAlive**: Feature to maintain sandbox sessions between operations
+- **Wrangler**: Cloudflare's CLI tool for managing Workers and secrets
+- **Bearer Token**: Authentication token passed in HTTP Authorization header
+- **Preview URL**: Public URL exposing services running in sandbox
+- **Background Process**: Long-running process within sandbox independent of MCP connection
+- **Cold Start**: Time to initialize new V8 isolate (~1ms for sandboxes)
+- **Warm Start**: Time to reuse existing isolate (<100μs)
+
+### Appendix H: References & Links
+
+**Official Documentation:**
+- Cloudflare Sandbox: https://developers.cloudflare.com/sandbox/
+- Sandbox API Reference: https://developers.cloudflare.com/sandbox/api/
+- Sandbox Lifecycle: https://developers.cloudflare.com/sandbox/api/lifecycle/
+- Sandbox Options: https://developers.cloudflare.com/sandbox/configuration/sandbox-options/
+- Sandbox SDK GitHub: https://github.com/cloudflare/sandbox-sdk
+
+**Related Projects:**
+- Model Context Protocol: https://modelcontextprotocol.io
+- txt2mcp (reference implementation): Internal reference
+- Cloudflare Workers: https://developers.cloudflare.com/workers/
+- Wrangler CLI: https://developers.cloudflare.com/workers/wrangler/
+
+**Community Resources:**
+- MCP Discord: [Link TBD]
+- Cloudflare Discord: https://discord.gg/cloudflaredev
+- GitHub Discussions: [Repository TBD]
+- Stack Overflow tag: [cloudflare-sandbox]
 
 ---
 
@@ -1208,15 +1090,16 @@ console.log(result.stdout);
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | Nov 25, 2025 | Matthew Carey | Initial draft |
+| 2.0 | Nov 25, 2025 | Matthew Carey | Updated with corrected tool specs, V8 isolate details, keepAlive features, preview URLs, enhanced technical architecture |
 
-**Approval:**
-- [ ] Technical Review
-- [ ] Security Review
-- [ ] Product Review
-- [ ] Final Approval
+**Review & Approval:**
+- [ ] Technical Review - Pending
+- [ ] Security Review - Pending
+- [ ] Architecture Review - Pending
+- [ ] Final Approval - Pending
 
 **Next Review Date:** December 25, 2025
 
 ---
 
-*This document is maintained in the sandbox-mcp repository and should be updated as requirements evolve.*
+*This document is maintained in the sandbox-mcp repository and should be updated as requirements evolve. For questions or clarifications, please open a GitHub issue.*
