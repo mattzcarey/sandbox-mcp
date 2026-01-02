@@ -1,11 +1,13 @@
 {
 	"name": "sandbox-mcp",
-	"version": "0.1.0",
+	"version": "0.0.0",
 	"private": true,
 	"type": "module",
 	"scripts": {
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
+		"dev:inspect": "concurrently \"wrangler dev\" \"npx @modelcontextprotocol/inspector\" --kill-others",
+		"test": "vitest run",
 		"typecheck": "tsc --noEmit",
 		"types": "wrangler types",
 		"format": "biome format --write .",
@@ -13,17 +15,25 @@
 		"check": "biome check --write ."
 	},
 	"dependencies": {
-		"@cloudflare/sandbox": "^0.5.3",
-		"@modelcontextprotocol/sdk": "^1.22.0",
-		"agents": "^0.2.23",
-		"hono": "^4.7.0",
-		"nanoid": "^5.1.6",
-		"zod": "^3.24.0"
+		"@cloudflare/sandbox": "^0.6.7",
+		"@modelcontextprotocol/sdk": "^1.25.1",
+		"@opencode-ai/sdk": "^1.0.184",
+		"agents": "^0.2.0",
+		"ai": "^5.0.2",
+		"effect": "^3.19.13",
+		"hono": "^4.11.1",
+		"jose": "^6.1.3",
+		"zod": "^4.2.1"
+	},
+	"overrides": {
+		"@modelcontextprotocol/sdk": "^1.25.1"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",
-		"@types/node": "^22.10.0",
-		"typescript": "^5.7.0",
-		"wrangler": "^4.46.0"
+		"@types/node": "^25.0.3",
+		"concurrently": "^9.2.1",
+		"typescript": "^5.9.3",
+		"vitest": "^4.0.16",
+		"wrangler": "^4.56.0"
 	}
 }

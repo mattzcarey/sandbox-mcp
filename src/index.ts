@@ -1,790 +1,185 @@
-import { type Sandbox, getSandbox } from "@cloudflare/sandbox";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { Agent, getAgentByName } from "agents";
-import {
-  createMcpHandler,
-  WorkerTransport,
-  type TransportState,
-} from "agents/mcp";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
-import { z } from "zod";
-import { nanoid } from "nanoid";
+// src/index.ts
+import { getSandbox } from "@cloudflare/sandbox";
+import { createOpencodeServer } from "@cloudflare/sandbox/opencode";
+import type { Config } from "@opencode-ai/sdk";
+import { Effect, Option } from "effect";
 
+import { OpenCodeMcpAgent } from "./agent/mcp-agent";
+import type { SessionMetadata } from "./models/session";
+import {
+  anthropic,
+  createProxyHandler,
+  createProxyToken,
+  github,
+  toContainerUrl,
+} from "./proxy";
+import { makeSessionStorageLayer, SessionStorage } from "./services/session";
+import { ExecuteTaskWorkflow } from "./workflows/execute-task";
+import { ensureSandboxReady } from "./workflows/helpers/sandbox";
+
+// Export Sandbox class from @cloudflare/sandbox
 export { Sandbox } from "@cloudflare/sandbox";
 
-const STATE_KEY = "mcp_transport_state";
+// Export Durable Object and Workflow classes
+export { OpenCodeMcpAgent };
+export { ExecuteTaskWorkflow };
 
-interface State {
-  sandboxId: string | null;
-}
+/**
+ * Create proxy handler for zero-trust authentication.
+ *
+ * Routes:
+ * - /proxy/anthropic/* → Anthropic API (injects ANTHROPIC_API_KEY)
+ * - /proxy/github/* → GitHub (injects GITHUB_TOKEN for git operations)
+ */
+const proxyHandler = createProxyHandler<Env>({
+  mountPath: "/proxy",
+  jwtSecret: (env) => env.PROXY_JWT_SECRET,
+  services: { anthropic, github },
+});
 
-export class SandboxMcpServer extends Agent<Env, State> {
-  server = new McpServer({
-    name: "sandbox-mcp",
-    version: "1.0.0",
-  });
-
-  initialState: State = {
-    sandboxId: null,
-  };
-
-  transport = new WorkerTransport({
-    sessionIdGenerator: () => this.name,
-    storage: {
-      get: () => {
-        return this.ctx.storage.kv.get<TransportState>(STATE_KEY);
-      },
-      set: (state: TransportState) => {
-        this.ctx.storage.kv.put<TransportState>(STATE_KEY, state);
-      },
-    },
-  });
-
-  onStart() {
-    // Tool 1: createSandbox - Get or create a sandbox instance
-    this.server.registerTool(
-      "createSandbox",
-      {
-        description:
-          "Creates a new sandbox instance. Returns sandbox ID and status. We can only use a limited number of sandboxes, so if you already have a sandbox, you should use it. If you pass a sandboxId we will validate it and return it if it exists.",
-        inputSchema: {
-          sandboxId: z.string().optional(),
+/**
+ * Get OpenCode config that uses the proxy for API calls.
+ *
+ * The JWT token is passed as the API key, and the baseURL points to our proxy.
+ * The proxy validates the JWT and injects the real ANTHROPIC_API_KEY.
+ */
+function getProxyOpencodeConfig(
+  proxyBaseUrl: string,
+  proxyToken: string
+): Config {
+  const containerProxyUrl = toContainerUrl(proxyBaseUrl);
+  return {
+    provider: {
+      anthropic: {
+        options: {
+          apiKey: proxyToken,
+          baseURL: `${containerProxyUrl}/proxy/anthropic`,
         },
       },
-      async ({ sandboxId }) => {
-        try {
-          const id = sandboxId || nanoid(16).toLowerCase();
-
-          console.log(`Creating sandbox with id: ${id}`);
-          const sandbox = getSandbox(this.env.SANDBOX, id);
-          this.setState({ sandboxId: id });
-
-          console.log("Got sandbox, executing test command...");
-          // Verify sandbox is accessible - sandbox.exec is Cloudflare Sandbox SDK method
-          const result = await sandbox.exec("echo 'sandbox ready'");
-          console.log("Exec result:", JSON.stringify(result));
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId: id,
-                    status: result.success ? "ready" : "error",
-                    message: result.success
-                      ? "Sandbox is ready for code execution"
-                      : `Sandbox initialization failed: ${result.stderr}`,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          console.error("createSandbox error:", error);
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to create sandbox: ${
-                  error instanceof Error ? error.message : String(error)
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 2: exec - Run any bash command in the sandbox
-    this.server.registerTool(
-      "exec",
-      {
-        description:
-          "Run any bash command in the sandbox. Returns stdout, stderr, and exit code.",
-        inputSchema: z.object({
-          sandboxId: z.string().describe("ID of the sandbox to execute in"),
-          command: z.string().describe("Bash command to execute"),
-          timeout: z
-            .number()
-            .optional()
-            .default(30000)
-            .describe("Maximum execution time in milliseconds"),
-          envVars: z
-            .record(z.string())
-            .optional()
-            .describe("Additional environment variables for execution"),
-        }),
-      },
-      async ({ sandboxId, command, timeout, envVars }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-
-          // sandbox.exec is the Cloudflare Sandbox SDK method for isolated execution
-          const result = await sandbox.exec(command, {
-            timeout,
-            env: {
-              ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
-              ...envVars,
-            },
-          });
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    success: result.success,
-                    exitCode: result.exitCode,
-                    stdout: result.stdout,
-                    stderr: result.stderr,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Execution failed: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 3: startProcess - Start a long-running process
-    this.server.registerTool(
-      "startProcess",
-      {
-        description:
-          "Starts a long-running background process in the sandbox. The process continues running independently of the MCP connection.",
-        inputSchema: z.object({
-          sandboxId: z
-            .string()
-            .describe("ID of the sandbox to start the process in"),
-          command: z
-            .string()
-            .describe("Command to run as a background process"),
-          envVars: z
-            .record(z.string())
-            .optional()
-            .describe("Environment variables for the process"),
-        }),
-      },
-      async ({ sandboxId, command, envVars }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-
-          const proc = await sandbox.startProcess(command, {
-            env: envVars,
-          });
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    processId: proc.id,
-                    pid: proc.pid,
-                    command: proc.command,
-                    status: proc.status,
-                    message: "Background process started successfully",
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to start background process: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 4: listProcesses - List all running processes in a sandbox
-    this.server.registerTool(
-      "listProcesses",
-      {
-        description:
-          "Lists all running background processes in a sandbox. Returns process IDs, commands, and status.",
-        inputSchema: z.object({
-          sandboxId: z
-            .string()
-            .describe("ID of the sandbox to list processes from"),
-        }),
-      },
-      async ({ sandboxId }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-          const processes = await sandbox.listProcesses();
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    processes: processes.map((p) => ({
-                      processId: p.id,
-                      pid: p.pid,
-                      command: p.command,
-                      status: p.status,
-                    })),
-                    count: processes.length,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to list processes: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 5: getProcessLogs - Get logs from a background process
-    this.server.registerTool(
-      "getProcessLogs",
-      {
-        description:
-          "Gets accumulated log output from a running or completed background process.",
-        inputSchema: z.object({
-          sandboxId: z.string().describe("ID of the sandbox"),
-          processId: z.string().describe("ID of the process to get logs from"),
-        }),
-      },
-      async ({ sandboxId, processId }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-          const logs = await sandbox.getProcessLogs(processId);
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    processId,
-                    logs,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to get process logs: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 6: killProcess - Kill a specific background process
-    this.server.registerTool(
-      "killProcess",
-      {
-        description: "Terminates a specific background process in the sandbox.",
-        inputSchema: z.object({
-          sandboxId: z.string().describe("ID of the sandbox"),
-          processId: z.string().describe("ID of the process to kill"),
-          signal: z
-            .string()
-            .optional()
-            .describe(
-              "Signal to send (e.g., 'SIGTERM', 'SIGKILL'). Defaults to SIGTERM."
-            ),
-        }),
-      },
-      async ({ sandboxId, processId, signal }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-          await sandbox.killProcess(processId, signal);
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    processId,
-                    status: "killed",
-                    signal: signal || "SIGTERM",
-                    message: "Process terminated successfully",
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to kill process: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 7: destroySandbox - Terminate and cleanup a sandbox
-    this.server.registerTool(
-      "destroySandbox",
-      {
-        description:
-          "Terminates a sandbox and deletes all associated state, files, and processes. This action cannot be undone.",
-        inputSchema: z.object({
-          sandboxId: z.string().describe("ID of the sandbox to destroy"),
-        }),
-      },
-      async ({ sandboxId }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-
-          await sandbox.destroy();
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    status: "destroyed",
-                    message: "Sandbox terminated and all state deleted",
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to destroy sandbox: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 8: gitCheckout - Clone a git repository into the sandbox
-    this.server.registerTool(
-      "gitCheckout",
-      {
-        description:
-          "Clones a git repository into the sandbox. Supports public repos and private repos with token auth. Use this instead of manually running git clone.",
-        inputSchema: z.object({
-          sandboxId: z.string().describe("ID of the sandbox to clone into"),
-          repositoryUrl: z
-            .string()
-            .describe(
-              "Git repository URL. For private repos, include token: https://TOKEN@github.com/user/repo.git"
-            ),
-          branch: z
-            .string()
-            .optional()
-            .describe(
-              "Specific branch to checkout. Defaults to default branch."
-            ),
-          targetDir: z
-            .string()
-            .optional()
-            .describe(
-              "Directory to clone into. Defaults to repo name in /workspace."
-            ),
-        }),
-      },
-      async ({ sandboxId, repositoryUrl, branch, targetDir }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-
-          // Use the Cloudflare Sandbox gitCheckout API
-          await sandbox.gitCheckout(repositoryUrl, {
-            branch,
-            targetDir,
-          });
-
-          // Get the directory that was created
-          const repoName =
-            targetDir ||
-            repositoryUrl.split("/").pop()?.replace(".git", "") ||
-            "repo";
-          const clonePath = targetDir || `/workspace/${repoName}`;
-
-          // Verify the clone succeeded
-          const lsResult = await sandbox.exec(`ls -la ${clonePath}`);
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    status: "cloned",
-                    repositoryUrl: repositoryUrl.replace(
-                      /https:\/\/[^@]+@/,
-                      "https://***@"
-                    ), // Hide tokens
-                    branch: branch || "default",
-                    path: clonePath,
-                    files: lsResult.stdout,
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to clone repository: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 9: runClaudeCode - Run Claude Code in headless mode
-    this.server.registerTool(
-      "runClaudeCode",
-      {
-        description:
-          "Runs Claude Code (AI coding assistant) in headless mode to complete a coding task. Starts as a background process that can be monitored with listProcesses and getProcessLogs. Claude Code is pre-installed in the sandbox container.",
-        inputSchema: z.object({
-          sandboxId: z
-            .string()
-            .describe("ID of the sandbox to run Claude Code in"),
-          prompt: z
-            .string()
-            .describe("The task/prompt for Claude Code to complete"),
-          workingDirectory: z
-            .string()
-            .optional()
-            .default("/workspace")
-            .describe(
-              "Working directory for Claude Code. Defaults to /workspace."
-            ),
-          allowedTools: z
-            .string()
-            .optional()
-            .default(
-              "Bash,Glob,Grep,LS,exit_plan_mode,Read,Edit,MultiEdit,Write,NotebookRead,NotebookEdit,WebFetch,TodoRead,TodoWrite,WebSearch"
-            )
-            .describe(
-              "Comma-separated list of tools Claude Code can use. Defaults to all tools."
-            ),
-          outputFormat: z
-            .enum(["text", "json", "stream-json"])
-            .optional()
-            .default("text")
-            .describe(
-              "Output format: text (human readable, default), json (final result), stream-json (streaming progress, requires verbose)"
-            ),
-          maxTurns: z
-            .number()
-            .optional()
-            .describe(
-              "Maximum number of agentic turns. If not set, Claude Code uses its default."
-            ),
-        }),
-      },
-      async ({
-        sandboxId,
-        prompt,
-        workingDirectory,
-        allowedTools,
-        outputFormat,
-        maxTurns,
-      }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-
-          // Build the Claude Code command with proper flags
-          // Claude is installed via bun at /root/.bun/bin/claude
-          // The sandbox runs as root, so this path is accessible
-          const claudePath = "/root/.bun/bin/claude";
-
-          // Escape the prompt for shell
-          const escapedPrompt = prompt
-            .replace(/\\/g, "\\\\")
-            .replace(/"/g, '\\"')
-            .replace(/`/g, "\\`")
-            .replace(/\$/g, "\\$");
-
-          let command = `cd ${workingDirectory} && ${claudePath} -p "${escapedPrompt}"`;
-
-          // Add allowed tools (--dangerously-skip-permissions cannot be used as sandbox runs as root)
-          command += ` --allowedTools "${allowedTools}"`;
-
-          // Add output format
-          command += ` --output-format ${outputFormat}`;
-
-          // Add max turns if specified
-          if (maxTurns) {
-            command += ` --max-turns ${maxTurns}`;
-          }
-
-          // Redirect stderr to stdout for complete output
-          command += " 2>&1";
-
-          // Start Claude Code as a background process
-          const proc = await sandbox.startProcess(command, {
-            env: {
-              ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
-              PATH: "/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-              HOME: "/root",
-            },
-          });
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    processId: proc.id,
-                    pid: proc.pid,
-                    status: proc.status,
-                    workingDirectory,
-                    prompt:
-                      prompt.slice(0, 200) + (prompt.length > 200 ? "..." : ""),
-                    message:
-                      "Claude Code started. Use listProcesses to check status and getProcessLogs to get output.",
-                    tips: [
-                      "Monitor progress with: getProcessLogs(sandboxId, processId)",
-                      "Check completion with: listProcesses(sandboxId)",
-                      "Output is in stream-json format - look for 'result' type messages",
-                    ],
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to start Claude Code: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-
-    // Tool 10: exposePort - Expose a port from the sandbox as a public URL
-    this.server.registerTool(
-      "exposePort",
-      {
-        description:
-          "Exposes a port from the sandbox container as a publicly accessible preview URL. Use this when you need to access a web server, API, or other service running in the sandbox from outside. The URL format is {port}-{sandboxId}.{domain}.",
-        inputSchema: z.object({
-          sandboxId: z.string().describe("ID of the sandbox"),
-          port: z
-            .number()
-            .describe(
-              "Port number to expose (e.g., 3000, 8080). Must be a port that a service is listening on inside the sandbox."
-            ),
-        }),
-      },
-      async ({ sandboxId, port }) => {
-        try {
-          const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-
-          // exposePort returns a URL that can be used to access the port
-          const previewUrl = await sandbox.exposePort(port, {
-            hostname: "sandbox.mcp.mattzcarey.com",
-          });
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    sandboxId,
-                    port,
-                    previewUrl,
-                    message: `Port ${port} is now accessible at the preview URL`,
-                    tips: [
-                      "Make sure a service is actually running on this port inside the sandbox",
-                      "Use startProcess to start a web server before exposing the port",
-                      "The preview URL will remain active as long as the sandbox is running",
-                    ],
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Failed to expose port: ${
-                  error instanceof Error ? error.message : "Unknown error"
-                }`,
-              },
-            ],
-          };
-        }
-      }
-    );
-  }
-
-  async ensureDestroy() {
-    const schedules = this.getSchedules().filter(
-      (s) => s.callback === "destroySandbox"
-    );
-    if (schedules.length > 0) {
-      // Cancel previously set destroy schedules
-      for (const s of schedules) {
-        await this.cancelSchedule(s.id);
-      }
-    }
-    // Destroy after 1 hour of inactivity
-    await this.schedule(60 * 60, "destroySandbox");
-  }
-
-  async destroySandbox() {
-    const sandboxId = this.state.sandboxId;
-    if (sandboxId) {
-      const sandbox = getSandbox(this.env.SANDBOX, sandboxId);
-      await sandbox.destroy();
-    }
-
-    this.destroy();
-  }
-
-  async onMcpRequest(request: Request) {
-    this.ensureDestroy();
-    return createMcpHandler(this.server, {
-      transport: this.transport,
-    })(request, this.env, {} as ExecutionContext);
-  }
+    },
+  };
 }
 
-const app = new Hono<{ Bindings: Env }>();
+/**
+ * Cookie name for tracking which session the web UI is viewing.
+ * This is needed because OpenCode's frontend loads assets from root (/)
+ * and we need to know which sandbox to proxy those requests to.
+ */
+const SESSION_COOKIE_NAME = "opencode_session_id";
 
-app.use("/*", cors());
+/**
+ * Get session ID from cookie
+ */
+function getSessionFromCookie(request: Request): string | null {
+  const cookieHeader = request.headers.get("cookie");
+  if (!cookieHeader) return null;
 
-app.use("/mcp/*", async (c, next) => {
-  const authHeader = c.req.header("Authorization");
-
-  if (!authHeader?.startsWith("Bearer ")) {
-    return c.json({ error: "Missing or invalid Authorization header" }, 401);
+  const cookies = cookieHeader.split(";").map((c) => c.trim());
+  for (const cookie of cookies) {
+    const [name, value] = cookie.split("=");
+    if (name === SESSION_COOKIE_NAME && value) {
+      return value;
+    }
   }
+  return null;
+}
 
-  const token = authHeader.slice(7);
-  if (token !== c.env.AUTH_TOKEN) {
-    return c.json({ error: "Invalid authentication token" }, 401);
-  }
+/**
+ * Get session metadata from R2 using the SessionStorage service.
+ * Returns null if session not found or on error.
+ */
+function getSessionMetadata(
+  bucket: R2Bucket,
+  sessionId: string
+): Effect.Effect<SessionMetadata | null> {
+  const layer = makeSessionStorageLayer(bucket);
 
-  await next();
-});
+  return Effect.gen(function* () {
+    const storage = yield* SessionStorage;
+    const result = yield* storage.getSession(sessionId);
+    return Option.getOrNull(result);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.catchAll(() => Effect.succeed(null))
+  );
+}
 
-app.get("/health", (c) => {
-  return c.json({ status: "ok", service: "sandbox-mcp" });
-});
-
-app.get("/", (c) => {
-  return c.json({
-    name: "sandbox-mcp",
-    version: "1.0.0",
-    description: "MCP server for Cloudflare Sandbox code execution",
-    endpoint: "/mcp",
-    auth: "Bearer token required",
-    tools: [
-      "createSandbox",
-      "exec",
-      "startProcess",
-      "listProcesses",
-      "getProcessLogs",
-      "killProcess",
-      "destroySandbox",
-      "gitCheckout",
-      "runClaudeCode",
-      "exposePort",
-    ],
+/**
+ * Proxy request to the appropriate sandbox.
+ *
+ * This function ensures the sandbox is ready before proxying:
+ * - Restores OpenCode backup if needed
+ * - Clones repository if needed
+ * - Configures proxy credentials if needed
+ *
+ * All initialization is idempotent - safe to call on every request.
+ */
+async function proxyToSandbox(
+  request: Request,
+  env: Env,
+  sessionId: string,
+  targetPath: string
+): Promise<Response> {
+  // Get sandbox for this session (will wake it up if sleeping)
+  const sandbox = getSandbox(env.Sandbox, sessionId, {
+    normalizeId: true,
   });
-});
 
-// Export the combined handler
+  // Create a short-lived proxy token for web UI access
+  const proxyToken = await Effect.runPromise(
+    createProxyToken({
+      secret: env.PROXY_JWT_SECRET,
+      sandboxId: sessionId,
+      expiresIn: "15m", // Short-lived for web UI sessions
+    })
+  );
+
+  // Get session metadata to know repository info
+  const metadata = await Effect.runPromise(
+    getSessionMetadata(env.SESSIONS_BUCKET, sessionId)
+  );
+
+  // Derive base URL from request (no need for env var)
+  const requestUrl = new URL(request.url);
+  const baseUrl = `${requestUrl.protocol}//${requestUrl.host}`;
+
+  // Ensure sandbox is ready (idempotent - checks state before acting)
+  const ready = await ensureSandboxReady({
+    sandbox,
+    sessionId,
+    bucket: env.SESSIONS_BUCKET,
+    proxyBaseUrl: baseUrl,
+    proxyToken,
+    repository: metadata?.repository,
+  });
+
+  // Start OpenCode server with proxy-based config and correct workspace path
+  const server = await createOpencodeServer(sandbox, {
+    directory: ready.workspacePath,
+    config: getProxyOpencodeConfig(baseUrl, proxyToken),
+  });
+
+  // Rewrite URL to the target path - OpenCode expects requests at root
+  const url = new URL(request.url);
+  const rewrittenUrl = new URL(targetPath, url.origin);
+  rewrittenUrl.search = url.search;
+
+  // Create new request with rewritten URL but preserve method/headers/body
+  const rewrittenRequest = new Request(rewrittenUrl.toString(), {
+    method: request.method,
+    headers: request.headers,
+    body:
+      request.method !== "GET" && request.method !== "HEAD"
+        ? request.body
+        : undefined,
+    redirect: request.redirect,
+  });
+
+  // Proxy directly to container
+  return sandbox.containerFetch(rewrittenRequest, server.port);
+}
+
+// Worker fetch handler
 export default {
   async fetch(
     request: Request,
@@ -793,40 +188,108 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
-    // Route /mcp to the MCP handler
-    if (url.pathname.startsWith("/mcp")) {
-      const sessionIdHeader = request.headers.get("mcp-session-id");
-      const sessionId = sessionIdHeader ?? crypto.randomUUID();
-
-      // Clone request to read body for logging without consuming it
-      const clonedRequest = request.clone();
-      let bodyForLog: unknown = null;
-      try {
-        const contentType = request.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
-          bodyForLog = await clonedRequest.json();
-        } else {
-          bodyForLog = await clonedRequest.text();
-        }
-      } catch {
-        bodyForLog = "[failed to parse body]";
-      }
-
-      // Log session ID and request details
-      console.log("=== MCP Request Debug ===");
-      console.log("Method:", request.method);
-      console.log("Path:", url.pathname);
-      console.log("mcp-session-id header:", sessionIdHeader ?? "(not set)");
-      console.log("Using session ID:", sessionId);
-      console.log("Request body:", JSON.stringify(bodyForLog, null, 2));
-      console.log("All headers:", JSON.stringify(Object.fromEntries(request.headers.entries()), null, 2));
-      console.log("=========================");
-
-      const agent = await getAgentByName(env.MCP_SERVER, sessionId);
-      return await agent.onMcpRequest(request);
+    // Health check
+    if (url.pathname === "/health") {
+      return new Response("OK", { status: 200 });
     }
 
-    // Route everything else to Hono
-    return app.fetch(request, env, ctx);
+    // Proxy routes - zero-trust authentication for sandbox requests
+    // Must be before other routes to intercept /proxy/* paths
+    if (url.pathname.startsWith("/proxy/")) {
+      return proxyHandler(request, env);
+    }
+
+    // MCP endpoint - route to McpAgent
+    if (url.pathname.startsWith("/mcp")) {
+      return OpenCodeMcpAgent.serve("/mcp", { binding: "MCP_AGENT" }).fetch(
+        request,
+        env,
+        ctx
+      );
+    }
+
+    // Web UI entry point - /session/{sessionId} sets cookie and redirects to OpenCode
+    // OpenCode expects URLs like /{base64(directory)}/session/{opencode-session-id}
+    // We query R2 to get the actual OpenCode session ID and workspace path
+    //
+    // IMPORTANT: Don't match OpenCode's own API routes like /session/status, /session/list
+    // Our session IDs are 8 hex chars (e.g., "a1b2c3d4"), so we use that pattern
+    const sessionMatch = url.pathname.match(/^\/session\/([0-9a-f]{8})\/?$/);
+    if (sessionMatch) {
+      const sessionId = sessionMatch[1];
+
+      // Look up session info from R2
+      const metadata = await Effect.runPromise(
+        getSessionMetadata(env.SESSIONS_BUCKET, sessionId)
+      );
+
+      if (!metadata) {
+        return new Response(
+          JSON.stringify({ error: "Session not found", sessionId }),
+          {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+
+      // Use the stored workspace path, or default to /workspace
+      const workspacePath = metadata.workspacePath || "/workspace";
+      const workspaceBase64 = btoa(workspacePath);
+
+      // Build redirect URL - include OpenCode session ID if available
+      let redirectPath = `/${workspaceBase64}/session`;
+      if (metadata.opencodeSessionId) {
+        redirectPath += `/${metadata.opencodeSessionId}`;
+      }
+
+      const redirectUrl = new URL(redirectPath, url.origin);
+      redirectUrl.searchParams.set("url", url.origin);
+
+      return new Response(null, {
+        status: 302,
+        headers: {
+          Location: redirectUrl.toString(),
+          "Set-Cookie": `${SESSION_COOKIE_NAME}=${sessionId}; Path=/; SameSite=Lax`,
+        },
+      });
+    }
+
+    // Catch-all: Proxy ANY request to the sandbox when session cookie is present
+    // This handles OpenCode API routes like /path, /project, /provider, /global/event,
+    // /session/list, /session/{uuid}/prompt, etc.
+    // Must come BEFORE the default JSON response
+    const sessionId = getSessionFromCookie(request);
+    if (sessionId) {
+      try {
+        return await proxyToSandbox(request, env, sessionId, url.pathname);
+      } catch (error) {
+        console.error("API proxy error:", error);
+        return new Response(
+          JSON.stringify({ error: "Failed to proxy request" }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+    }
+
+    // Default response
+    return new Response(
+      JSON.stringify({
+        name: "sandbox-mcp",
+        version: "1.0.0",
+        endpoints: {
+          health: "/health",
+          mcp: "/mcp",
+          webUi: "/session/{sessionId}/",
+          proxy: "/proxy/{service}/*",
+        },
+      }),
+      {
+        headers: { "Content-Type": "application/json" },
+      }
+    );
   },
 };
